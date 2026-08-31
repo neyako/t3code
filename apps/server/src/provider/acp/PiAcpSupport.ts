@@ -143,6 +143,61 @@ export function piReasoningOptionsFromThoughtLevels(input: {
   return { options, currentValue: input.currentValue };
 }
 
+/** Canonical pi thinking levels, in escalation order. */
+const PI_THINKING_LEVEL_ORDER = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const;
+
+export type PiThinkingLevelsByModel = ReadonlyMap<string, ReadonlyArray<string>>;
+
+export interface PiCatalogModelEntry {
+  readonly provider: string;
+  readonly id: string;
+  readonly thinkingLevelMap?: Record<string, string | null> | undefined;
+}
+
+/**
+ * pi's ACP surface advertises one generic thinking-level list, but the
+ * `thinkingLevelMap` in pi's own catalog (`~/.pi/agent/models-store.json`,
+ * overridden by `models.json`) says which levels each model actually maps to
+ * — GLM for example only supports low/high/max. Build a
+ * `"provider/model" -> wire levels` index from those catalog entries so the
+ * probe can scope the Reasoning row per model.
+ */
+export function piThinkingLevelsFromCatalogEntries(
+  entries: ReadonlyArray<PiCatalogModelEntry>,
+): PiThinkingLevelsByModel {
+  const byModel = new Map<string, ReadonlyArray<string>>();
+  for (const entry of entries) {
+    const map = entry.thinkingLevelMap;
+    if (!map) {
+      continue;
+    }
+    const levels = PI_THINKING_LEVEL_ORDER.filter((level) => {
+      const mapped = map[level];
+      return typeof mapped === "string" && mapped.length > 0;
+    }).map((level) => map[level] as string);
+    if (levels.length > 0) {
+      byModel.set(`${entry.provider}/${entry.id}`, levels);
+    }
+  }
+  return byModel;
+}
+
+/** Resolves the supported reasoning levels for an ACP model value like `zai/glm-5.3`. */
+export function piSupportedReasoningLevels(
+  thinkingLevelsByModel: PiThinkingLevelsByModel,
+  modelValue: string,
+): ReadonlyArray<string> | undefined {
+  return thinkingLevelsByModel.get(modelValue);
+}
+
 /**
  * Pi exposes its model catalog as an ACP `select` config option (typically
  * id "model") instead of the `models` session state used by Grok. This reads

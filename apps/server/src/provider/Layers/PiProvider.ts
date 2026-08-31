@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off preferSchemaOverJson:off
 import {
   type ModelCapabilities,
   type PiSettings,
@@ -7,10 +8,15 @@ import {
 import { causeErrorTag } from "@t3tools/shared/observability";
 import { createModelCapabilities } from "@t3tools/shared/model";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
+import * as NodeFS from "node:fs";
+
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import { HttpClient } from "effect/unstable/http";
@@ -32,8 +38,12 @@ import {
   makePiAcpRuntime,
   piModelConfigOptionFromConfigOptions,
   piReasoningOptionsFromThoughtLevels,
+  piSupportedReasoningLevels,
+  piThinkingLevelsFromCatalogEntries,
   piThoughtLevelConfigOptionFromConfigOptions,
   resolvePiAcpBaseModelId,
+  type PiCatalogModelEntry,
+  type PiThinkingLevelsByModel,
 } from "../acp/PiAcpSupport.ts";
 
 const PI_PRESENTATION = {
@@ -43,6 +53,11 @@ const PI_PRESENTATION = {
 const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [],
 });
+
+const PI_CATALOG_STORE_PATH = ".pi/agent/models-store.json";
+const PI_CATALOG_LOCAL_PATH = ".pi/agent/models.json";
+const PI_AGENT_AUTH_PATH = ".pi/agent/auth.json";
+const PI_AGENT_SETTINGS_PATH = ".pi/agent/settings.json";
 
 const VERSION_PROBE_TIMEOUT_MS = 4_000;
 const PI_ACP_MODEL_DISCOVERY_TIMEOUT_MS = 20_000;
@@ -106,6 +121,8 @@ function buildPiDiscoveredModelsFromConfigOptions(input: {
   readonly currentValue: string | undefined;
   readonly availableModels: ReadonlyArray<{ readonly value: string; readonly name: string }>;
   readonly reasoning: ReturnType<typeof piReasoningOptionsFromThoughtLevels>;
+  readonly thoughtLevelConfigId: string | undefined;
+  readonly thinkingLevelsByModel: PiThinkingLevelsByModel;
 }): ReadonlyArray<ServerProviderModel> {
   if (input.availableModels.length === 0) {
     return [];
@@ -119,26 +136,33 @@ function buildPiDiscoveredModelsFromConfigOptions(input: {
         ...input.availableModels.filter((model) => model.value !== input.currentValue),
       ]
     : input.availableModels;
-  const capabilities: ModelCapabilities =
-    input.reasoning.options.length > 0
-      ? createModelCapabilities({
-          optionDescriptors: [
-            {
-              id: "reasoningEffort",
-              label: "Reasoning",
-              type: "select",
-              options: input.reasoning.options.map((option) => ({
-                id: option.value,
-                label: option.label,
-                ...(option.isDefault ? { isDefault: true } : {}),
-              })),
-              ...(input.reasoning.currentValue
-                ? { currentValue: input.reasoning.currentValue }
-                : {}),
-            },
-          ],
-        })
-      : EMPTY_CAPABILITIES;
+  const reasoningDescriptors = input.reasoning.options;
+  const buildCapabilities = (modelValue: string): ModelCapabilities => {
+    // Per-model levels win when pi's catalog maps them (e.g. GLM only
+    // supports low/high/max); otherwise fall back to the generic session list.
+    const supportedLevels = piSupportedReasoningLevels(input.thinkingLevelsByModel, modelValue);
+    const options = (supportedLevels ?? reasoningDescriptors.map((option) => option.value)).map(
+      (value) => ({
+        id: value,
+        label: value,
+        ...(value === input.reasoning.currentValue ? { isDefault: true } : {}),
+      }),
+    );
+    if (options.length === 0) {
+      return EMPTY_CAPABILITIES;
+    }
+    return createModelCapabilities({
+      optionDescriptors: [
+        {
+          id: "reasoningEffort",
+          label: "Reasoning",
+          type: "select",
+          options,
+          ...(input.reasoning.currentValue ? { currentValue: input.reasoning.currentValue } : {}),
+        },
+      ],
+    });
+  };
   for (const model of ordered) {
     const slug = resolvePiAcpBaseModelId(model.value);
     if (seen.has(slug)) {
@@ -149,11 +173,129 @@ function buildPiDiscoveredModelsFromConfigOptions(input: {
       slug,
       name: model.name.trim() || slug,
       isCustom: false,
-      capabilities,
+      capabilities: buildCapabilities(model.value),
     });
   }
   return models;
 }
+
+const PiCatalogModel = Schema.Struct({
+  id: Schema.String,
+  thinkingLevelMap: Schema.optionalKey(Schema.Record(Schema.String, Schema.NullOr(Schema.String))),
+});
+
+export interface PiCatalogContext {
+  /** `"provider/model" -> wire levels` for models pi documents a map for. */
+  readonly thinkingLevelsByModel: PiThinkingLevelsByModel;
+  /** Providers pi considers configured: logged in (auth.json) or user-defined (models.json), plus the default provider. */
+  readonly allowedProviders: ReadonlySet<string>;
+}
+
+/**
+ * Reads pi's local config to scope what T3 exposes. pi advertises every model
+ * in its catalog (including unauthenticated ones like OpenRouter's public
+ * list), which buries the user's actual setup — T3 keeps only providers that
+ * are logged in, user-defined, or pi's default.
+ */
+const readPiCatalogContext = Effect.gen(function* () {
+  const path = yield* Path.Path;
+  const home = process.env.HOME?.trim() || process.env.PI_DIR?.trim();
+  const empty: PiCatalogContext = {
+    thinkingLevelsByModel: new Map<string, ReadonlyArray<string>>() as PiThinkingLevelsByModel,
+    allowedProviders: new Set<string>(),
+  };
+  if (!home) {
+    return empty;
+  }
+  const readJson = (relative: string): Record<string, unknown> | undefined => {
+    try {
+      const content = NodeFS.readFileSync(path.join(home, relative), "utf8");
+      if (!content.trim()) {
+        return undefined;
+      }
+      const parsed: unknown = JSON.parse(content);
+      return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const store = readJson(PI_CATALOG_STORE_PATH);
+  const localFile = readJson(PI_CATALOG_LOCAL_PATH);
+  const localProviders =
+    typeof localFile?.providers === "object" && localFile.providers !== null
+      ? (localFile.providers as Record<string, unknown>)
+      : undefined;
+  const auth = readJson(PI_AGENT_AUTH_PATH);
+  const settings = readJson(PI_AGENT_SETTINGS_PATH);
+
+  const allowedProviders = new Set<string>();
+  for (const key of Object.keys(auth ?? {})) {
+    allowedProviders.add(key);
+  }
+  for (const key of Object.keys(localProviders ?? {})) {
+    allowedProviders.add(key);
+  }
+  if (typeof settings?.defaultProvider === "string") {
+    allowedProviders.add(settings.defaultProvider);
+  }
+
+  // thinkingLevelMap entries: models-store.json is a bare provider map;
+  // models.json wraps providers in a `providers` key.
+  const entries: Array<PiCatalogModelEntry> = [];
+  const scanProviderModels = (provider: string, models: unknown): void => {
+    if (!Array.isArray(models)) {
+      return;
+    }
+    for (const raw of models) {
+      if (typeof raw !== "object" || raw === null) {
+        continue;
+      }
+      const record = raw as Record<string, unknown>;
+      if (
+        typeof record.id !== "string" ||
+        typeof record.thinkingLevelMap !== "object" ||
+        record.thinkingLevelMap === null
+      ) {
+        continue;
+      }
+      const map: Record<string, string | null> = {};
+      for (const [level, mapped] of Object.entries(record.thinkingLevelMap)) {
+        map[level] = typeof mapped === "string" ? mapped : null;
+      }
+      entries.push({ provider, id: record.id, thinkingLevelMap: map });
+    }
+  };
+  for (const [provider, entry] of Object.entries(store ?? {})) {
+    const shape =
+      typeof entry === "object" && entry !== null ? (entry as Record<string, unknown>) : {};
+    scanProviderModels(provider, shape.models);
+  }
+  for (const [provider, entry] of Object.entries(localProviders ?? {})) {
+    const shape =
+      typeof entry === "object" && entry !== null ? (entry as Record<string, unknown>) : {};
+    scanProviderModels(provider, shape.models);
+  }
+
+  const result = {
+    thinkingLevelsByModel: piThinkingLevelsFromCatalogEntries(entries),
+    allowedProviders,
+  };
+  try {
+    NodeFS.writeFileSync(
+      "/tmp/pi-dbg.txt",
+      JSON.stringify({
+        home,
+        allowed: [...allowedProviders],
+        entries: entries.length,
+        mapSize: result.thinkingLevelsByModel.size,
+        glm: result.thinkingLevelsByModel.get("zai/glm-5.3"),
+      }),
+    );
+  } catch {}
+  return result;
+});
 
 const discoverPiModelsViaAcp = (
   piSettings: PiSettings,
@@ -182,10 +324,30 @@ const discoverPiModelsViaAcp = (
       availableLevels: thoughtLevel?.availableLevels ?? [],
       currentValue: thoughtLevel?.currentValue,
     });
+    const catalog = yield* readPiCatalogContext;
+    // pi advertises its whole catalog; keep only providers the user actually
+    // has configured (authed or user-defined) so the picker stays honest.
+    const configuredModels = modelConfig.availableModels.filter(
+      (model) =>
+        !model.value.includes("/") ||
+        catalog.allowedProviders.has(model.value.slice(0, model.value.indexOf("/"))),
+    );
+    try {
+      NodeFS.writeFileSync(
+        "/tmp/pi-dbg2.txt",
+        JSON.stringify({
+          advertised: modelConfig.availableModels.length,
+          configured: configuredModels.length,
+          firstAdvertised: modelConfig.availableModels.slice(0, 3).map((m) => m.value),
+        }),
+      );
+    } catch {}
     return buildPiDiscoveredModelsFromConfigOptions({
       currentValue: modelConfig.currentValue,
-      availableModels: modelConfig.availableModels,
+      availableModels: configuredModels.length > 0 ? configuredModels : modelConfig.availableModels,
       reasoning,
+      thoughtLevelConfigId: thoughtLevel?.configId,
+      thinkingLevelsByModel: catalog.thinkingLevelsByModel,
     });
   }).pipe(Effect.scoped);
 
@@ -215,7 +377,7 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
 ): Effect.fn.Return<
   ServerProviderDraft,
   never,
-  ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto
+  ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto | Path.Path
 > {
   void cwd;
   const checkedAt = DateTime.formatIso(yield* DateTime.now);

@@ -7,6 +7,8 @@ import {
   buildPiAcpSpawnInput,
   piModelConfigOptionFromConfigOptions,
   piReasoningOptionsFromThoughtLevels,
+  piSupportedReasoningLevels,
+  piThinkingLevelsFromCatalogEntries,
   piThoughtLevelConfigOptionFromConfigOptions,
   resolvePiAcpBaseModelId,
 } from "./PiAcpSupport.ts";
@@ -190,6 +192,30 @@ describe("applyPiAcpReasoningSelection", () => {
     );
     expect(result).toBe("low");
     expect(calls).toEqual([]);
+  });
+});
+
+describe("piThinkingLevelsFromCatalogEntries", () => {
+  it("indexes the mapped levels per provider/model", () => {
+    const index = piThinkingLevelsFromCatalogEntries([
+      {
+        provider: "zai",
+        id: "glm-5.3",
+        thinkingLevelMap: {
+          off: null,
+          minimal: null,
+          low: "low",
+          medium: null,
+          high: "high",
+          xhigh: null,
+          max: "max",
+        },
+      },
+      { provider: "zai", id: "no-map" },
+    ]);
+    expect(piSupportedReasoningLevels(index, "zai/glm-5.3")).toEqual(["low", "high", "max"]);
+    expect(piSupportedReasoningLevels(index, "zai/no-map")).toBeUndefined();
+    expect(piSupportedReasoningLevels(index, "unknown/model")).toBeUndefined();
   });
 });
 
