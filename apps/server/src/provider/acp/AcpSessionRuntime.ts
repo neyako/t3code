@@ -262,6 +262,7 @@ type AcpStartState =
   | {
       readonly _tag: "Starting";
       readonly deferred: Deferred.Deferred<AcpSessionRuntimeStartResult, EffectAcpErrors.AcpError>;
+      readonly bufferedUpdates: ReadonlyArray<EffectAcpSchema.SessionNotification>;
     }
   | { readonly _tag: "Started"; readonly result: AcpStartedState };
 
@@ -393,13 +394,21 @@ export const make = (
         if (sessionUpdateIsReplay(notification)) {
           return;
         }
-        const startState = yield* Ref.get(startStateRef);
         // One runtime projects one root ACP session. Child-session updates need
         // explicit lineage routing and must never be flattened into this stream.
-        if (
-          startState._tag !== "Started" ||
-          notification.sessionId !== startState.result.sessionId
-        ) {
+        const action = yield* Ref.modify(startStateRef, (state) => {
+          if (state._tag === "Starting") {
+            return [
+              "buffered" as const,
+              { ...state, bufferedUpdates: [...state.bufferedUpdates, notification] },
+            ];
+          }
+          if (state._tag === "Started" && notification.sessionId === state.result.sessionId) {
+            return ["process" as const, state];
+          }
+          return ["drop" as const, state];
+        });
+        if (action === "drop" || action === "buffered") {
           return;
         }
         yield* handleSessionUpdate({
@@ -679,9 +688,33 @@ export const make = (
           case "NotStarted":
             return [
               startOnce.pipe(
-                Effect.tap((result) =>
-                  Ref.set(startStateRef, { _tag: "Started", result }).pipe(
+                Effect.flatMap((result) =>
+                  Ref.modify(startStateRef, (state) => {
+                    const bufferedUpdates = state._tag === "Starting" ? state.bufferedUpdates : [];
+                    return [
+                      bufferedUpdates,
+                      { _tag: "Started", result } satisfies AcpStartState,
+                    ] as const;
+                  }).pipe(
+                    Effect.flatMap((bufferedUpdates) =>
+                      Effect.forEach(
+                        bufferedUpdates,
+                        (notification) =>
+                          notification.sessionId === result.sessionId
+                            ? handleSessionUpdate({
+                                queue: eventQueue,
+                                modeStateRef,
+                                toolCallsRef,
+                                assistantSegmentRef,
+                                assistantItemRuntimeId,
+                                params: notification,
+                              })
+                            : Effect.void,
+                        { discard: true },
+                      ),
+                    ),
                     Effect.andThen(Deferred.succeed(deferred, result)),
+                    Effect.as(result),
                   ),
                 ),
                 Effect.onError((cause) =>
@@ -690,7 +723,7 @@ export const make = (
                   ),
                 ),
               ),
-              { _tag: "Starting", deferred } satisfies AcpStartState,
+              { _tag: "Starting", deferred, bufferedUpdates: [] } satisfies AcpStartState,
             ] as const;
         }
       });
