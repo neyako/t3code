@@ -31,6 +31,8 @@ import {
 import {
   makePiAcpRuntime,
   piModelConfigOptionFromConfigOptions,
+  piReasoningOptionsFromThoughtLevels,
+  piThoughtLevelConfigOptionFromConfigOptions,
   resolvePiAcpBaseModelId,
 } from "../acp/PiAcpSupport.ts";
 
@@ -103,6 +105,7 @@ function piModelsFromSettings(
 function buildPiDiscoveredModelsFromConfigOptions(input: {
   readonly currentValue: string | undefined;
   readonly availableModels: ReadonlyArray<{ readonly value: string; readonly name: string }>;
+  readonly reasoning: ReturnType<typeof piReasoningOptionsFromThoughtLevels>;
 }): ReadonlyArray<ServerProviderModel> {
   if (input.availableModels.length === 0) {
     return [];
@@ -116,6 +119,26 @@ function buildPiDiscoveredModelsFromConfigOptions(input: {
         ...input.availableModels.filter((model) => model.value !== input.currentValue),
       ]
     : input.availableModels;
+  const capabilities: ModelCapabilities =
+    input.reasoning.options.length > 0
+      ? createModelCapabilities({
+          optionDescriptors: [
+            {
+              id: "reasoningEffort",
+              label: "Reasoning",
+              type: "select",
+              options: input.reasoning.options.map((option) => ({
+                id: option.value,
+                label: option.label,
+                ...(option.isDefault ? { isDefault: true } : {}),
+              })),
+              ...(input.reasoning.currentValue
+                ? { currentValue: input.reasoning.currentValue }
+                : {}),
+            },
+          ],
+        })
+      : EMPTY_CAPABILITIES;
   for (const model of ordered) {
     const slug = resolvePiAcpBaseModelId(model.value);
     if (seen.has(slug)) {
@@ -126,7 +149,7 @@ function buildPiDiscoveredModelsFromConfigOptions(input: {
       slug,
       name: model.name.trim() || slug,
       isCustom: false,
-      capabilities: EMPTY_CAPABILITIES,
+      capabilities,
     });
   }
   return models;
@@ -152,9 +175,17 @@ const discoverPiModelsViaAcp = (
     if (!modelConfig) {
       return [];
     }
+    const thoughtLevel = piThoughtLevelConfigOptionFromConfigOptions(
+      started.sessionSetupResult.configOptions,
+    );
+    const reasoning = piReasoningOptionsFromThoughtLevels({
+      availableLevels: thoughtLevel?.availableLevels ?? [],
+      currentValue: thoughtLevel?.currentValue,
+    });
     return buildPiDiscoveredModelsFromConfigOptions({
       currentValue: modelConfig.currentValue,
       availableModels: modelConfig.availableModels,
+      reasoning,
     });
   }).pipe(Effect.scoped);
 

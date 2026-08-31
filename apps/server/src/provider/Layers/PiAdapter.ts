@@ -14,6 +14,7 @@ import {
 } from "@t3tools/contracts";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { stableStringify } from "@t3tools/shared/relaySigning";
+
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -56,8 +57,10 @@ import {
 import { parsePermissionRequest } from "../acp/AcpRuntimeModel.ts";
 import {
   applyPiAcpModelSelection,
+  applyPiAcpReasoningSelection,
   makePiAcpRuntime,
   piModelConfigOptionFromConfigOptions,
+  piThoughtLevelConfigOptionFromConfigOptions,
   resolvePiAcpBaseModelId,
 } from "../acp/PiAcpSupport.ts";
 import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
@@ -100,6 +103,8 @@ interface PiSessionContext {
    */
   promptsInFlight: number;
   currentModelId: string | undefined;
+  currentReasoning: string | undefined;
+  thoughtLevelConfigId: string | undefined;
   stopped: boolean;
 }
 
@@ -414,6 +419,9 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
           const modelConfig = piModelConfigOptionFromConfigOptions(
             started.sessionSetupResult.configOptions,
           );
+          const thoughtLevelConfig = piThoughtLevelConfigOptionFromConfigOptions(
+            started.sessionSetupResult.configOptions,
+          );
           const requestedStartModelId = piModelSelection?.model
             ? resolvePiAcpBaseModelId(piModelSelection.model)
             : undefined;
@@ -421,6 +429,18 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
             runtime: acp,
             currentModelId: modelConfig?.currentValue,
             requestedModelId: requestedStartModelId,
+            mapError: (cause) =>
+              mapAcpToAdapterError(PROVIDER, input.threadId, "session/set_config_option", cause),
+          });
+          const requestedStartReasoning = getModelSelectionStringOptionValue(
+            piModelSelection,
+            "reasoningEffort",
+          );
+          const boundReasoning = yield* applyPiAcpReasoningSelection({
+            runtime: acp,
+            thoughtLevelConfigId: thoughtLevelConfig?.configId,
+            currentReasoning: thoughtLevelConfig?.currentValue,
+            requestedReasoning: requestedStartReasoning,
             mapError: (cause) =>
               mapAcpToAdapterError(PROVIDER, input.threadId, "session/set_config_option", cause),
           });
@@ -455,6 +475,8 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
             interruptedTurnIds: new Set(),
             promptsInFlight: 0,
             currentModelId: boundModelId,
+            currentReasoning: boundReasoning ?? thoughtLevelConfig?.currentValue,
+            thoughtLevelConfigId: thoughtLevelConfig?.configId,
             stopped: false,
           };
 
@@ -680,9 +702,32 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
                 currentModelId: ctx.currentModelId,
                 requestedModelId: requestedTurnModelId,
                 mapError: (cause) =>
-                  mapAcpToAdapterError(PROVIDER, input.threadId, "session/set_config_option", cause),
+                  mapAcpToAdapterError(
+                    PROVIDER,
+                    input.threadId,
+                    "session/set_config_option",
+                    cause,
+                  ),
               });
               ctx.currentModelId = currentModelId;
+              const requestedTurnReasoning = getModelSelectionStringOptionValue(
+                turnModelSelection,
+                "reasoningEffort",
+              );
+              const currentReasoning = yield* applyPiAcpReasoningSelection({
+                runtime: ctx.acp,
+                thoughtLevelConfigId: ctx.thoughtLevelConfigId,
+                currentReasoning: ctx.currentReasoning,
+                requestedReasoning: requestedTurnReasoning,
+                mapError: (cause) =>
+                  mapAcpToAdapterError(
+                    PROVIDER,
+                    input.threadId,
+                    "session/set_config_option",
+                    cause,
+                  ),
+              });
+              ctx.currentReasoning = currentReasoning;
               const displayModel = currentModelId
                 ? resolvePiAcpBaseModelId(currentModelId)
                 : undefined;
@@ -731,26 +776,24 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
           }),
         );
 
-        const promptResultRef = yield* Ref.make<
-          EffectAcpSchema.PromptResponse | undefined
-        >(undefined);
+        const promptResultRef = yield* Ref.make<EffectAcpSchema.PromptResponse | undefined>(
+          undefined,
+        );
         const promptFailedRef = yield* Ref.make<string | undefined>(undefined);
 
         return yield* Effect.gen(function* () {
-          const result = yield* prepared.acp
-            .prompt({ prompt: prepared.promptParts })
-            .pipe(
-              Effect.tap((promptResult) => Ref.set(promptResultRef, promptResult)),
-              Effect.tapError((error) =>
-                Ref.set(
-                  promptFailedRef,
-                  mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", error).message,
-                ),
+          const result = yield* prepared.acp.prompt({ prompt: prepared.promptParts }).pipe(
+            Effect.tap((promptResult) => Ref.set(promptResultRef, promptResult)),
+            Effect.tapError((error) =>
+              Ref.set(
+                promptFailedRef,
+                mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", error).message,
               ),
-              Effect.mapError((error) =>
-                mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", error),
-              ),
-            );
+            ),
+            Effect.mapError((error) =>
+              mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", error),
+            ),
+          );
 
           return yield* withThreadLock(
             input.threadId,
@@ -767,7 +810,10 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
               ctx.promptsInFlight = Math.max(0, ctx.promptsInFlight - 1);
               ctx.turns = ctx.turns.some((turn) => turn.id === prepared.turnId)
                 ? ctx.turns
-                : [...ctx.turns, { id: prepared.turnId, items: [{ prompt: prepared.promptParts, result }] }];
+                : [
+                    ...ctx.turns,
+                    { id: prepared.turnId, items: [{ prompt: prepared.promptParts, result }] },
+                  ];
               if (ctx.interruptedTurnIds.has(prepared.turnId)) {
                 ctx.interruptedTurnIds.delete(prepared.turnId);
                 return {

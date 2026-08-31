@@ -3,8 +3,11 @@ import * as Effect from "effect/Effect";
 
 import {
   applyPiAcpModelSelection,
+  applyPiAcpReasoningSelection,
   buildPiAcpSpawnInput,
   piModelConfigOptionFromConfigOptions,
+  piReasoningOptionsFromThoughtLevels,
+  piThoughtLevelConfigOptionFromConfigOptions,
   resolvePiAcpBaseModelId,
 } from "./PiAcpSupport.ts";
 
@@ -83,6 +86,110 @@ describe("piModelConfigOptionFromConfigOptions", () => {
       { value: "a", name: "A" },
       { value: "b", name: "B" },
     ]);
+  });
+});
+
+describe("piThoughtLevelConfigOptionFromConfigOptions", () => {
+  const thoughtLevels = [
+    { value: "off", name: "Thinking: off" },
+    { value: "high", name: "Thinking: high" },
+  ];
+
+  it("finds the thought_level select option", () => {
+    const parsed = piThoughtLevelConfigOptionFromConfigOptions([
+      {
+        type: "select",
+        id: "thought_level",
+        name: "Thought level",
+        category: "thought_level",
+        currentValue: "high",
+        options: thoughtLevels,
+      } as never,
+    ]);
+    expect(parsed?.configId).toBe("thought_level");
+    expect(parsed?.currentValue).toBe("high");
+    expect(parsed?.availableLevels).toEqual(thoughtLevels);
+  });
+
+  it("returns undefined when absent", () => {
+    expect(piThoughtLevelConfigOptionFromConfigOptions([])).toBeUndefined();
+  });
+});
+
+describe("piReasoningOptionsFromThoughtLevels", () => {
+  it("maps levels to reasoning options with the current default", () => {
+    const reasoning = piReasoningOptionsFromThoughtLevels({
+      availableLevels: [
+        { value: "off", name: "Thinking: off" },
+        { value: "high", name: "Thinking: high" },
+      ],
+      currentValue: "high",
+    });
+    expect(reasoning.options).toEqual([
+      { value: "off", label: "Thinking: off" },
+      { value: "high", label: "Thinking: high", isDefault: true },
+    ]);
+    expect(reasoning.currentValue).toBe("high");
+  });
+
+  it("returns empty options when no levels exist", () => {
+    expect(
+      piReasoningOptionsFromThoughtLevels({ availableLevels: [], currentValue: undefined }),
+    ).toEqual({ options: [], currentValue: undefined });
+  });
+});
+
+describe("applyPiAcpReasoningSelection", () => {
+  const makeRuntime = (calls: string[]) => ({
+    setConfigOption: (configId: string, value: string) => {
+      calls.push(`${configId}=${value}`);
+      return Effect.void as never;
+    },
+  });
+
+  it("skips the write when no thought_level option exists", async () => {
+    const calls: string[] = [];
+    const result = await Effect.runPromise(
+      applyPiAcpReasoningSelection({
+        runtime: makeRuntime(calls) as never,
+        thoughtLevelConfigId: undefined,
+        currentReasoning: "high",
+        requestedReasoning: "low",
+        mapError: (cause) => cause,
+      }),
+    );
+    expect(result).toBe("high");
+    expect(calls).toEqual([]);
+  });
+
+  it("writes the requested level through setConfigOption", async () => {
+    const calls: string[] = [];
+    const result = await Effect.runPromise(
+      applyPiAcpReasoningSelection({
+        runtime: makeRuntime(calls) as never,
+        thoughtLevelConfigId: "thought_level",
+        currentReasoning: "high",
+        requestedReasoning: "low",
+        mapError: (cause) => cause,
+      }),
+    );
+    expect(result).toBe("low");
+    expect(calls).toEqual(["thought_level=low"]);
+  });
+
+  it("skips the write when the level is unchanged", async () => {
+    const calls: string[] = [];
+    const result = await Effect.runPromise(
+      applyPiAcpReasoningSelection({
+        runtime: makeRuntime(calls) as never,
+        thoughtLevelConfigId: "thought_level",
+        currentReasoning: "low",
+        requestedReasoning: "low",
+        mapError: (cause) => cause,
+      }),
+    );
+    expect(result).toBe("low");
+    expect(calls).toEqual([]);
   });
 });
 

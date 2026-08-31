@@ -83,6 +83,66 @@ export interface PiModelConfigOption {
   readonly availableModels: ReadonlyArray<{ readonly value: string; readonly name: string }>;
 }
 
+export interface PiThoughtLevelConfigOption {
+  readonly configId: string;
+  readonly currentValue: string | undefined;
+  readonly availableLevels: ReadonlyArray<{ readonly value: string; readonly name: string }>;
+}
+
+/**
+ * Pi exposes thinking levels as an ACP select config option (category
+ * `thought_level`) and mirrors them in the session `modes` state.
+ */
+export function piThoughtLevelConfigOptionFromConfigOptions(
+  configOptions: ReadonlyArray<EffectAcpSchema.SessionConfigOption> | null | undefined,
+): PiThoughtLevelConfigOption | undefined {
+  const option = configOptions?.find(
+    (entry) => entry.type === "select" && entry.category === "thought_level",
+  );
+  if (!option || option.type !== "select") {
+    return undefined;
+  }
+  const currentValue =
+    typeof option.currentValue === "string" && option.currentValue.trim().length > 0
+      ? option.currentValue.trim()
+      : undefined;
+  const options = option.options.flatMap((entry) => ("group" in entry ? entry.options : [entry]));
+  return {
+    configId: option.id,
+    currentValue,
+    availableLevels: options
+      .filter((entry) => typeof entry.value === "string" && entry.value.trim().length > 0)
+      .map((entry) => ({ value: entry.value, name: entry.name ?? entry.value })),
+  };
+}
+
+/**
+ * Reasoning options for the T3 model picker, derived from pi's thinking
+ * levels. Uses the shared `reasoningEffort` option id so clients render the
+ * standard Reasoning row.
+ */
+export function piReasoningOptionsFromThoughtLevels(input: {
+  readonly availableLevels: ReadonlyArray<{ readonly value: string; readonly name: string }>;
+  readonly currentValue: string | undefined;
+}): {
+  readonly options: ReadonlyArray<{
+    value: string;
+    label: string;
+    isDefault?: boolean;
+  }>;
+  readonly currentValue: string | undefined;
+} {
+  if (input.availableLevels.length === 0) {
+    return { options: [], currentValue: undefined };
+  }
+  const options = input.availableLevels.map((level) => ({
+    value: level.value,
+    label: level.name,
+    ...(level.value === input.currentValue ? { isDefault: true } : {}),
+  }));
+  return { options, currentValue: input.currentValue };
+}
+
 /**
  * Pi exposes its model catalog as an ACP `select` config option (typically
  * id "model") instead of the `models` session state used by Grok. This reads
@@ -131,8 +191,27 @@ export function applyPiAcpModelSelection<E>(input: {
   if (!requested || requested === input.currentModelId) {
     return Effect.succeed(input.currentModelId);
   }
-  return input.runtime.setModel(requested).pipe(
-    Effect.mapError(input.mapError),
-    Effect.as(requested),
-  );
+  return input.runtime
+    .setModel(requested)
+    .pipe(Effect.mapError(input.mapError), Effect.as(requested));
+}
+
+/**
+ * Selects the thinking level through the `thought_level` config option. No-op
+ * when the harness does not advertise one or nothing was requested.
+ */
+export function applyPiAcpReasoningSelection<E>(input: {
+  readonly runtime: Pick<AcpSessionRuntime.AcpSessionRuntime["Service"], "setConfigOption">;
+  readonly thoughtLevelConfigId: string | undefined;
+  readonly currentReasoning: string | undefined;
+  readonly requestedReasoning: string | undefined;
+  readonly mapError: (cause: EffectAcpErrors.AcpError) => E;
+}): Effect.Effect<string | undefined, E> {
+  const requested = input.requestedReasoning?.trim();
+  if (!input.thoughtLevelConfigId || !requested || requested === input.currentReasoning) {
+    return Effect.succeed(input.currentReasoning);
+  }
+  return input.runtime
+    .setConfigOption(input.thoughtLevelConfigId, requested)
+    .pipe(Effect.mapError(input.mapError), Effect.as(requested));
 }
