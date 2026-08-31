@@ -4,11 +4,14 @@ import {
   type PiSettings,
   type ServerProvider,
   type ServerProviderModel,
+  type ServerProviderSlashCommand,
+  type ServerProviderSkill,
 } from "@t3tools/contracts";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import { createModelCapabilities } from "@t3tools/shared/model";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import * as NodeFS from "node:fs";
+import * as PathModule from "node:path";
 
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -16,6 +19,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import { HttpClient } from "effect/unstable/http";
@@ -69,6 +73,102 @@ const PI_FALLBACK_MODELS: ReadonlyArray<ServerProviderModel> = [
     capabilities: EMPTY_CAPABILITIES,
   },
 ];
+
+function trimOptional(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+export function parsePiAvailableCommands(
+  input: ReadonlyArray<unknown>,
+): ReadonlyArray<ServerProviderSlashCommand> {
+  const byName = new Map<string, ServerProviderSlashCommand>();
+  for (const raw of input) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const record = raw as Record<string, unknown>;
+    const name = trimOptional(record.name)?.replace(/^\/+/, "");
+    if (!name) continue;
+    const description = trimOptional(record.description);
+    const inputRecord =
+      record.input && typeof record.input === "object"
+        ? (record.input as Record<string, unknown>)
+        : undefined;
+    const hint = trimOptional(inputRecord?.hint);
+    const key = name.toLowerCase();
+    const previous = byName.get(key);
+    byName.set(key, {
+      name: previous?.name ?? name,
+      ...(previous?.description
+        ? { description: previous.description }
+        : description
+          ? { description }
+          : {}),
+      ...(previous?.input?.hint ? { input: previous.input } : hint ? { input: { hint } } : {}),
+    });
+  }
+  return [...byName.values()];
+}
+
+export function discoverPiSkillsFromFilesystem(
+  home: string,
+  cwd: string,
+): ReadonlyArray<ServerProviderSkill> {
+  const roots: Array<{ path: string; scope: string }> = [
+    { path: PathModule.join(home, ".pi", "agent", "skills"), scope: "user" },
+  ];
+  try {
+    const settingsPath = PathModule.join(cwd, ".pi", "settings.json");
+    const settings = JSON.parse(NodeFS.readFileSync(settingsPath, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    const configured = Array.isArray(settings.skills) ? settings.skills : [];
+    for (const entry of configured) {
+      if (typeof entry !== "string") continue;
+      roots.push({ path: PathModule.resolve(cwd, entry), scope: "project" });
+    }
+  } catch {}
+  const out: ServerProviderSkill[] = [];
+  const seen = new Set<string>();
+  for (const root of roots) {
+    let dirs: string[];
+    try {
+      dirs = NodeFS.readdirSync(root.path, { withFileTypes: true })
+        .filter((e) => e.isDirectory())
+        .map((e) => e.name);
+    } catch {
+      continue;
+    }
+    for (const dir of dirs) {
+      const path = PathModule.join(root.path, dir);
+      if (seen.has(path)) continue;
+      let text: string;
+      try {
+        text = NodeFS.readFileSync(PathModule.join(path, "SKILL.md"), "utf8");
+      } catch {
+        continue;
+      }
+      const frontmatter = text.match(/^---\s*\n([\s\S]*?)\n---/);
+      if (!frontmatter) continue;
+      const metadata = frontmatter[1] ?? "";
+      const field = (name: string) =>
+        metadata
+          .match(new RegExp(`^${name}:\\s*(.+)$`, "m"))?.[1]
+          ?.trim()
+          .replace(/^['"]|['"]$/g, "");
+      const name = field("name") || dir;
+      const description = field("description");
+      out.push({
+        name,
+        path,
+        enabled: field("enabled") !== "false",
+        scope: root.scope,
+        ...(description ? { description, shortDescription: description } : {}),
+      });
+      seen.add(path);
+    }
+  }
+  return out.toSorted((a, b) => a.name.localeCompare(b.name));
+}
 
 export function buildInitialPiProviderSnapshot(
   piSettings: PiSettings,
@@ -299,6 +399,7 @@ const readPiCatalogContext = Effect.gen(function* () {
 const discoverPiModelsViaAcp = (
   piSettings: PiSettings,
   environment: NodeJS.ProcessEnv = process.env,
+  cwd: string = process.cwd(),
 ) =>
   Effect.gen(function* () {
     const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -314,7 +415,11 @@ const discoverPiModelsViaAcp = (
       started.sessionSetupResult.configOptions,
     );
     if (!modelConfig) {
-      return [];
+      return {
+        models: [],
+        slashCommands: [],
+        skills: discoverPiSkillsFromFilesystem(environment.HOME ?? "", cwd),
+      };
     }
     const thoughtLevel = piThoughtLevelConfigOptionFromConfigOptions(
       started.sessionSetupResult.configOptions,
@@ -341,13 +446,33 @@ const discoverPiModelsViaAcp = (
         }),
       );
     } catch {}
-    return buildPiDiscoveredModelsFromConfigOptions({
+    const models = buildPiDiscoveredModelsFromConfigOptions({
       currentValue: modelConfig.currentValue,
       availableModels: configuredModels.length > 0 ? configuredModels : modelConfig.availableModels,
       reasoning,
       thoughtLevelConfigId: thoughtLevel?.configId,
       thinkingLevelsByModel: catalog.thinkingLevelsByModel,
     });
+    const commandEvent = yield* Stream.runHead(
+      Stream.filter(acp.getEvents(), (event) => event._tag === "AvailableCommandsUpdated"),
+    ).pipe(Effect.timeoutOption(1_000));
+    const slashCommands = Option.isSome(commandEvent)
+      ? parsePiAvailableCommands(
+          (
+            commandEvent.value as {
+              readonly commands?: ReadonlyArray<unknown>;
+              readonly availableCommands?: ReadonlyArray<unknown>;
+            }
+          ).availableCommands ??
+            (commandEvent.value as { readonly commands?: ReadonlyArray<unknown> }).commands ??
+            [],
+        )
+      : [];
+    return {
+      models,
+      slashCommands,
+      skills: discoverPiSkillsFromFilesystem(environment.HOME ?? "", cwd),
+    };
   }).pipe(Effect.scoped);
 
 const runPiVersionCommand = (
@@ -378,7 +503,7 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
   never,
   ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto | Path.Path
 > {
-  void cwd;
+  cwd = cwd ?? process.cwd();
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
   const fallbackModels = piModelsFromSettings(piSettings.customModels);
 
@@ -464,7 +589,7 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
     });
   }
 
-  const discoveryExit = yield* discoverPiModelsViaAcp(piSettings, environment).pipe(
+  const discoveryExit = yield* discoverPiModelsViaAcp(piSettings, environment, cwd).pipe(
     Effect.timeoutOption(PI_ACP_MODEL_DISCOVERY_TIMEOUT_MS),
     Effect.exit,
   );
@@ -505,7 +630,8 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
       },
     });
   }
-  const discoveredModels = discoveryExit.value.value;
+  const discovered = discoveryExit.value.value;
+  const discoveredModels = discovered.models;
   // ponytail: pi advertises every catalog model (364 on this box) — capped for
   // wire size; raise the cap or filter by provider prefix once users ask.
   const cappedModels = discoveredModels.slice(0, 100);
@@ -525,6 +651,8 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
       status: "ready",
       auth: { status: "unknown" },
     },
+    slashCommands: discovered.slashCommands,
+    skills: discovered.skills,
   });
 });
 
