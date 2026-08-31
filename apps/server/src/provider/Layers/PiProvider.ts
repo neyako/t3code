@@ -11,19 +11,20 @@ import { causeErrorTag } from "@t3tools/shared/observability";
 import { createModelCapabilities } from "@t3tools/shared/model";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import * as NodeFS from "node:fs";
-import * as PathModule from "node:path";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Path from "effect/Path";
-import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import { HttpClient } from "effect/unstable/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { parse as parseYamlDocument } from "yaml";
 
 import {
   buildServerProvider,
@@ -111,63 +112,137 @@ export function parsePiAvailableCommands(
 export function discoverPiSkillsFromFilesystem(
   home: string,
   cwd: string,
+  configuredAgentDir?: string,
 ): ReadonlyArray<ServerProviderSkill> {
-  const roots: Array<{ path: string; scope: string }> = [
-    { path: PathModule.join(home, ".pi", "agent", "skills"), scope: "user" },
-  ];
-  try {
-    const settingsPath = PathModule.join(cwd, ".pi", "settings.json");
-    const settings = JSON.parse(NodeFS.readFileSync(settingsPath, "utf8")) as Record<
-      string,
-      unknown
-    >;
-    const configured = Array.isArray(settings.skills) ? settings.skills : [];
-    for (const entry of configured) {
-      if (typeof entry !== "string") continue;
-      roots.push({ path: PathModule.resolve(cwd, entry), scope: "project" });
-    }
-  } catch {}
-  const out: ServerProviderSkill[] = [];
-  const seen = new Set<string>();
-  for (const root of roots) {
-    let dirs: string[];
-    try {
-      dirs = NodeFS.readdirSync(root.path, { withFileTypes: true })
-        .filter((e) => e.isDirectory())
-        .map((e) => e.name);
-    } catch {
-      continue;
-    }
-    for (const dir of dirs) {
-      const path = PathModule.join(root.path, dir);
-      if (seen.has(path)) continue;
-      let text: string;
-      try {
-        text = NodeFS.readFileSync(PathModule.join(path, "SKILL.md"), "utf8");
-      } catch {
-        continue;
-      }
-      const frontmatter = text.match(/^---\s*\n([\s\S]*?)\n---/);
-      if (!frontmatter) continue;
-      const metadata = frontmatter[1] ?? "";
-      const field = (name: string) =>
-        metadata
-          .match(new RegExp(`^${name}:\\s*(.+)$`, "m"))?.[1]
-          ?.trim()
-          .replace(/^['"]|['"]$/g, "");
-      const name = field("name") || dir;
-      const description = field("description");
-      out.push({
-        name,
-        path,
-        enabled: field("enabled") !== "false",
-        scope: root.scope,
-        ...(description ? { description, shortDescription: description } : {}),
-      });
-      seen.add(path);
-    }
+  const resolvedHome = home.trim() || NodeOS.homedir();
+  const resolvedCwd = NodePath.resolve(cwd);
+  const resolvedAgentDir = configuredAgentDir?.trim()
+    ? (() => {
+        const value = configuredAgentDir.startsWith("~/")
+          ? NodePath.join(resolvedHome, configuredAgentDir.slice(2))
+          : configuredAgentDir;
+        return NodePath.isAbsolute(value)
+          ? NodePath.resolve(value)
+          : NodePath.resolve(resolvedCwd, value);
+      })()
+    : NodePath.join(resolvedHome, ".pi", "agent");
+  const roots: Array<{ path: string; scope: "user" | "project"; includeRootFiles: boolean }> = [];
+  const rootPaths = new Set<string>();
+  const addRoot = (path: string, scope: "user" | "project", includeRootFiles = true) => {
+    const resolved = NodePath.resolve(path);
+    if (rootPaths.has(resolved)) return;
+    rootPaths.add(resolved);
+    roots.push({ path: resolved, scope, includeRootFiles });
+  };
+  addRoot(NodePath.join(resolvedAgentDir, "skills"), "user");
+  addRoot(NodePath.join(resolvedHome, ".agents", "skills"), "user", false);
+
+  const projectDirs: string[] = [];
+  for (let directory = resolvedCwd; ; directory = NodePath.dirname(directory)) {
+    projectDirs.push(directory);
+    if (NodeFS.existsSync(NodePath.join(directory, ".git"))) break;
+    const parent = NodePath.dirname(directory);
+    if (parent === directory) break;
   }
-  return out.toSorted((a, b) => a.name.localeCompare(b.name));
+  for (const directory of projectDirs) {
+    addRoot(NodePath.join(directory, ".pi", "skills"), "project");
+    addRoot(NodePath.join(directory, ".agents", "skills"), "project", false);
+  }
+
+  const expandConfiguredPath = (value: string, base: string) => {
+    const trimmed = value.trim();
+    if (!trimmed || trimmed.startsWith("-")) return undefined;
+    const path = trimmed.startsWith("+") || trimmed.startsWith("!") ? trimmed.slice(1) : trimmed;
+    const resolved = path.startsWith("~/") ? NodePath.join(resolvedHome, path.slice(2)) : path;
+    return NodePath.isAbsolute(resolved)
+      ? NodePath.resolve(resolved)
+      : NodePath.resolve(base, resolved);
+  };
+  const readSettings = (path: string): ReadonlyArray<string> | undefined => {
+    try {
+      const settings = JSON.parse(NodeFS.readFileSync(path, "utf8")) as Record<string, unknown>;
+      return Array.isArray(settings.skills)
+        ? settings.skills.filter((entry): entry is string => typeof entry === "string")
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const globalConfigured = readSettings(NodePath.join(resolvedAgentDir, "settings.json"));
+  const projectConfigured = readSettings(NodePath.join(resolvedCwd, ".pi", "settings.json"));
+  for (const entry of globalConfigured ?? []) {
+    const path = expandConfiguredPath(entry, resolvedAgentDir);
+    if (path) addRoot(path, "user");
+  }
+  for (const entry of projectConfigured ?? []) {
+    const path = expandConfiguredPath(entry, resolvedCwd);
+    if (path) addRoot(path, "project");
+  }
+
+  const skillsByName = new Map<string, ServerProviderSkill>();
+  const visited = new Set<string>();
+  const parseSkill = (filePath: string, scope: "user" | "project") => {
+    const canonicalPath = NodePath.resolve(filePath);
+    if (visited.has(canonicalPath)) return;
+    visited.add(canonicalPath);
+    let text: string;
+    try {
+      text = NodeFS.readFileSync(canonicalPath, "utf8");
+    } catch {
+      return;
+    }
+    const match = text.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+    if (!match) return;
+    let metadata: unknown;
+    try {
+      metadata = parseYamlDocument(match[1] ?? "");
+    } catch {
+      return;
+    }
+    if (typeof metadata !== "object" || metadata === null || Array.isArray(metadata)) return;
+    const record = metadata as Record<string, unknown>;
+    const description = typeof record.description === "string" ? record.description.trim() : "";
+    if (!description) return;
+    const name =
+      typeof record.name === "string" && record.name.trim()
+        ? record.name.trim()
+        : NodePath.basename(NodePath.dirname(canonicalPath));
+    if (!name || skillsByName.has(name)) return;
+    skillsByName.set(name, {
+      name,
+      description,
+      path: canonicalPath,
+      enabled: true,
+      scope,
+      shortDescription: description,
+    });
+  };
+  const scan = (directory: string, scope: "user" | "project", includeRootFiles: boolean) => {
+    const resolved = NodePath.resolve(directory);
+    if (visited.has(resolved)) return;
+    let entries: NodeFS.Dirent[];
+    try {
+      entries = NodeFS.readdirSync(resolved, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    const declaredSkill = entries.find((entry) => entry.name === "SKILL.md" && entry.isFile());
+    if (declaredSkill) {
+      parseSkill(NodePath.join(resolved, declaredSkill.name), scope);
+      return;
+    }
+    for (const entry of entries.toSorted((left, right) => left.name.localeCompare(right.name))) {
+      if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
+      const path = NodePath.join(resolved, entry.name);
+      if (entry.isDirectory()) {
+        scan(path, scope, false);
+      } else if (includeRootFiles && entry.isFile() && entry.name.endsWith(".md")) {
+        parseSkill(path, scope);
+      }
+    }
+  };
+  for (const root of roots) scan(root.path, root.scope, root.includeRootFiles);
+  return [...skillsByName.values()].toSorted((a, b) => a.name.localeCompare(b.name));
 }
 
 export function buildInitialPiProviderSnapshot(
@@ -278,11 +353,6 @@ function buildPiDiscoveredModelsFromConfigOptions(input: {
   return models;
 }
 
-const PiCatalogModel = Schema.Struct({
-  id: Schema.String,
-  thinkingLevelMap: Schema.optionalKey(Schema.Record(Schema.String, Schema.NullOr(Schema.String))),
-});
-
 export interface PiCatalogContext {
   /** `"provider/model" -> wire levels` for models pi documents a map for. */
   readonly thinkingLevelsByModel: PiThinkingLevelsByModel;
@@ -381,18 +451,6 @@ const readPiCatalogContext = Effect.gen(function* () {
     thinkingLevelsByModel: piThinkingLevelsFromCatalogEntries(entries),
     allowedProviders,
   };
-  try {
-    NodeFS.writeFileSync(
-      "/tmp/pi-dbg.txt",
-      JSON.stringify({
-        home,
-        allowed: [...allowedProviders],
-        entries: entries.length,
-        mapSize: result.thinkingLevelsByModel.size,
-        glm: result.thinkingLevelsByModel.get("zai/glm-5.3"),
-      }),
-    );
-  } catch {}
   return result;
 });
 
@@ -407,18 +465,34 @@ const discoverPiModelsViaAcp = (
       piSettings,
       environment,
       childProcessSpawner,
-      cwd: process.cwd(),
+      cwd,
       clientInfo: { name: "t3-code-provider-probe", version: "0.0.0" },
     });
     const started = yield* acp.start();
+    const commandEvent = yield* Stream.runHead(
+      Stream.filter(acp.getEvents(), (event) => event._tag === "AvailableCommandsUpdated"),
+    ).pipe(Effect.timeoutOption(5_000), Effect.map(Option.flatten));
+    const slashCommands = Option.isSome(commandEvent)
+      ? parsePiAvailableCommands(
+          (
+            commandEvent.value as {
+              readonly availableCommands?: ReadonlyArray<unknown>;
+            }
+          ).availableCommands ?? [],
+        )
+      : [];
     const modelConfig = piModelConfigOptionFromConfigOptions(
       started.sessionSetupResult.configOptions,
     );
     if (!modelConfig) {
       return {
         models: [],
-        slashCommands: [],
-        skills: discoverPiSkillsFromFilesystem(environment.HOME ?? "", cwd),
+        slashCommands,
+        skills: discoverPiSkillsFromFilesystem(
+          environment.HOME ?? "",
+          cwd,
+          environment.PI_CODING_AGENT_DIR,
+        ),
       };
     }
     const thoughtLevel = piThoughtLevelConfigOptionFromConfigOptions(
@@ -436,16 +510,6 @@ const discoverPiModelsViaAcp = (
         !model.value.includes("/") ||
         catalog.allowedProviders.has(model.value.slice(0, model.value.indexOf("/"))),
     );
-    try {
-      NodeFS.writeFileSync(
-        "/tmp/pi-dbg2.txt",
-        JSON.stringify({
-          advertised: modelConfig.availableModels.length,
-          configured: configuredModels.length,
-          firstAdvertised: modelConfig.availableModels.slice(0, 3).map((m) => m.value),
-        }),
-      );
-    } catch {}
     const models = buildPiDiscoveredModelsFromConfigOptions({
       currentValue: modelConfig.currentValue,
       availableModels: configuredModels.length > 0 ? configuredModels : modelConfig.availableModels,
@@ -453,25 +517,14 @@ const discoverPiModelsViaAcp = (
       thoughtLevelConfigId: thoughtLevel?.configId,
       thinkingLevelsByModel: catalog.thinkingLevelsByModel,
     });
-    const commandEvent = yield* Stream.runHead(
-      Stream.filter(acp.getEvents(), (event) => event._tag === "AvailableCommandsUpdated"),
-    ).pipe(Effect.timeoutOption(1_000));
-    const slashCommands = Option.isSome(commandEvent)
-      ? parsePiAvailableCommands(
-          (
-            commandEvent.value as {
-              readonly commands?: ReadonlyArray<unknown>;
-              readonly availableCommands?: ReadonlyArray<unknown>;
-            }
-          ).availableCommands ??
-            (commandEvent.value as { readonly commands?: ReadonlyArray<unknown> }).commands ??
-            [],
-        )
-      : [];
     return {
       models,
       slashCommands,
-      skills: discoverPiSkillsFromFilesystem(environment.HOME ?? "", cwd),
+      skills: discoverPiSkillsFromFilesystem(
+        environment.HOME ?? "",
+        cwd,
+        environment.PI_CODING_AGENT_DIR,
+      ),
     };
   }).pipe(Effect.scoped);
 
