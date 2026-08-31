@@ -14,9 +14,11 @@ import {
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { stableStringify } from "@t3tools/shared/relaySigning";
 
+import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -24,6 +26,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
+import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 import * as Semaphore from "effect/Semaphore";
@@ -68,6 +71,8 @@ const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.fromJsonStri
 
 const PROVIDER = ProviderDriverKind.make("piAgent");
 const PI_RESUME_VERSION = 1 as const;
+const NANOS_PER_MILLI = 1_000_000n;
+const DEFAULT_PI_TURN_INACTIVITY_TIMEOUT_MS = 10 * 60 * 1_000;
 
 function encodeJsonStringForDiagnostics(input: unknown): string | undefined {
   const result = encodeUnknownJsonStringExit(input);
@@ -77,6 +82,12 @@ function encodeJsonStringForDiagnostics(input: unknown): string | undefined {
 export interface PiAdapterLiveOptions {
   readonly environment?: NodeJS.ProcessEnv;
   readonly instanceId?: ProviderInstanceId;
+  /** Override the conservative ACP turn liveness timeout in focused tests. */
+  readonly turnInactivityTimeoutMs?: number;
+}
+
+interface PiTurnLivenessSignal {
+  readonly turnId: TurnId;
 }
 
 interface PendingApproval {
@@ -101,6 +112,10 @@ interface PiSessionContext {
    * the last remaining prompt settles it.
    */
   promptsInFlight: number;
+  readonly turnsWithAssistantContent: Set<TurnId>;
+  readonly livenessSignals: Queue.Queue<PiTurnLivenessSignal>;
+  livenessTurnId: TurnId | undefined;
+  lastTurnActivityAtNanos: bigint | undefined;
   currentModelId: string | undefined;
   currentReasoning: string | undefined;
   thoughtLevelConfigId: string | undefined;
@@ -163,6 +178,13 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
     const sessions = new Map<ThreadId, PiSessionContext>();
     const threadLocksRef = yield* SynchronizedRef.make(new Map<string, Semaphore.Semaphore>());
     const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
+    const requestedTurnInactivityTimeoutMs = options?.turnInactivityTimeoutMs;
+    const turnInactivityTimeoutMs =
+      typeof requestedTurnInactivityTimeoutMs === "number" &&
+      Number.isFinite(requestedTurnInactivityTimeoutMs)
+        ? Math.max(1, Math.floor(requestedTurnInactivityTimeoutMs))
+        : DEFAULT_PI_TURN_INACTIVITY_TIMEOUT_MS;
+    const turnInactivityTimeoutNanos = BigInt(turnInactivityTimeoutMs) * NANOS_PER_MILLI;
 
     const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
     const randomUUIDv4 = crypto.randomUUIDv4.pipe(
@@ -212,6 +234,54 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
 
     const withThreadLock = <A, E, R>(threadId: string, effect: Effect.Effect<A, E, R>) =>
       Effect.flatMap(getThreadSemaphore(threadId), (semaphore) => semaphore.withPermit(effect));
+
+    const signalTurnLiveness = (ctx: PiSessionContext, turnId: TurnId) =>
+      Queue.offer(ctx.livenessSignals, { turnId }).pipe(Effect.asVoid);
+
+    const beginTurnLiveness = (ctx: PiSessionContext, turnId: TurnId) =>
+      Effect.gen(function* () {
+        ctx.livenessTurnId = turnId;
+        ctx.lastTurnActivityAtNanos = yield* Clock.monotonicTimeNanos;
+        ctx.turnsWithAssistantContent.delete(turnId);
+        yield* signalTurnLiveness(ctx, turnId);
+      });
+
+    const clearTurnLiveness = (ctx: PiSessionContext) => {
+      const turnId = ctx.livenessTurnId;
+      ctx.livenessTurnId = undefined;
+      ctx.lastTurnActivityAtNanos = undefined;
+      return turnId === undefined ? Effect.void : signalTurnLiveness(ctx, turnId);
+    };
+
+    const recordTurnActivity = Effect.fn("PiAdapter.recordTurnActivity")(function* (
+      ctx: PiSessionContext,
+      turnId: TurnId,
+      event: Extract<
+        AcpSessionRuntime.AcpSessionRuntimeEvent,
+        {
+          _tag:
+            | "AssistantItemStarted"
+            | "AssistantItemCompleted"
+            | "ToolCallUpdated"
+            | "ContentDelta";
+        }
+      >,
+    ) {
+      if (ctx.livenessTurnId !== turnId || ctx.interruptedTurnIds.has(turnId)) {
+        return;
+      }
+      if (event._tag === "ContentDelta" && event.text.length > 0) {
+        ctx.turnsWithAssistantContent.add(turnId);
+      }
+      ctx.lastTurnActivityAtNanos = yield* Clock.monotonicTimeNanos;
+      yield* signalTurnLiveness(ctx, turnId);
+    });
+
+    const isLiveTurn = (ctx: PiSessionContext, turnId: TurnId) =>
+      ctx.promptsInFlight > 0 &&
+      ctx.activeTurnId === turnId &&
+      ctx.session.activeTurnId === turnId &&
+      (ctx.session.status === "running" || ctx.session.status === "connecting");
 
     const resolveNotificationTurnId = (ctx: PiSessionContext): TurnId | undefined =>
       ctx.activeTurnId;
@@ -473,6 +543,10 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
             activeTurnId: undefined,
             interruptedTurnIds: new Set(),
             promptsInFlight: 0,
+            turnsWithAssistantContent: new Set(),
+            livenessSignals: yield* Queue.sliding<PiTurnLivenessSignal>(1),
+            livenessTurnId: undefined,
+            lastTurnActivityAtNanos: undefined,
             currentModelId: boundModelId,
             currentReasoning: boundReasoning ?? thoughtLevelConfig?.currentValue,
             thoughtLevelConfigId: thoughtLevelConfig?.configId,
@@ -492,6 +566,14 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
                 const turnId = resolveNotificationTurnId(ctx);
                 if (turnId === undefined || ctx.interruptedTurnIds.has(turnId)) {
                   return;
+                }
+                if (
+                  event._tag === "AssistantItemStarted" ||
+                  event._tag === "AssistantItemCompleted" ||
+                  event._tag === "ToolCallUpdated" ||
+                  event._tag === "ContentDelta"
+                ) {
+                  yield* recordTurnActivity(ctx, turnId, event);
                 }
                 const stamp = yield* makeEventStamp();
                 switch (event._tag) {
@@ -558,6 +640,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
 
           ctx.notificationFiber = nf;
           sessions.set(input.threadId, ctx);
+          yield* runTurnLivenessWatchdog(ctx).pipe(Effect.forkIn(ctx.scope), Effect.asVoid);
           sessionScopeTransferred = true;
 
           yield* offerRuntimeEvent({
@@ -598,8 +681,15 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
         if (!ctx) {
           return;
         }
+        const emptyResponse =
+          input.state === "completed" &&
+          input.stopReason === "end_turn" &&
+          !ctx.turnsWithAssistantContent.has(input.turnId);
+        const state = emptyResponse ? "failed" : input.state;
         ctx.promptsInFlight = 0;
         ctx.activeTurnId = undefined;
+        yield* clearTurnLiveness(ctx);
+        ctx.turnsWithAssistantContent.delete(input.turnId);
         const { activeTurnId: _activeTurnId, ...readySession } = ctx.session;
         ctx.session = {
           ...readySession,
@@ -613,14 +703,101 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
           threadId: input.threadId,
           turnId: input.turnId,
           payload:
-            input.state === "failed"
-              ? { state: "failed", errorMessage: input.errorMessage ?? "Pi turn failed." }
+            state === "failed"
+              ? {
+                  state: "failed",
+                  errorMessage: emptyResponse
+                    ? "Model returned no response"
+                    : (input.errorMessage ?? "Pi turn failed."),
+                }
               : {
-                  state: input.state,
+                  state,
                   stopReason: input.stopReason ?? null,
                 },
         });
       });
+
+    const settleStalledTurn = Effect.fn("PiAdapter.settleStalledTurn")(function* (
+      ctx: PiSessionContext,
+      turnId: TurnId,
+    ) {
+      yield* withThreadLock(
+        ctx.threadId,
+        Effect.gen(function* () {
+          const liveCtx = sessions.get(ctx.threadId);
+          if (
+            liveCtx !== ctx ||
+            ctx.stopped ||
+            !isLiveTurn(ctx, turnId) ||
+            ctx.interruptedTurnIds.has(turnId)
+          ) {
+            return;
+          }
+          const lastActivityAtNanos = ctx.lastTurnActivityAtNanos;
+          if (lastActivityAtNanos === undefined) {
+            return;
+          }
+          const nowNanos = yield* Clock.monotonicTimeNanos;
+          if (
+            !isLiveTurn(ctx, turnId) ||
+            ctx.interruptedTurnIds.has(turnId) ||
+            nowNanos - lastActivityAtNanos < turnInactivityTimeoutNanos
+          ) {
+            return;
+          }
+          ctx.interruptedTurnIds.add(turnId);
+          yield* Effect.ignore(
+            ctx.acp.cancel.pipe(
+              Effect.mapError((error) =>
+                mapAcpToAdapterError(PROVIDER, ctx.threadId, "session/cancel", error),
+              ),
+            ),
+          );
+          yield* Effect.ignore(ctx.acp.drainEvents);
+          yield* settleTurn({
+            threadId: ctx.threadId,
+            turnId,
+            state: "failed",
+            errorMessage: `Pi ACP turn stalled without progress for ${turnInactivityTimeoutMs}ms.`,
+          });
+        }),
+      );
+    });
+
+    const runTurnLivenessWatchdog = Effect.fn("PiAdapter.runTurnLivenessWatchdog")(
+      function* (ctx: PiSessionContext) {
+        while (true) {
+          if (ctx.stopped) {
+            return;
+          }
+          const turnId = ctx.livenessTurnId;
+          const lastActivityAtNanos =
+            turnId === undefined ? undefined : ctx.lastTurnActivityAtNanos;
+          if (
+            turnId === undefined ||
+            !isLiveTurn(ctx, turnId) ||
+            lastActivityAtNanos === undefined
+          ) {
+            yield* Queue.take(ctx.livenessSignals);
+            continue;
+          }
+          const nowNanos = yield* Clock.monotonicTimeNanos;
+          const remainingNanos = turnInactivityTimeoutNanos - (nowNanos - lastActivityAtNanos);
+          if (remainingNanos <= 0n) {
+            yield* settleStalledTurn(ctx, turnId);
+            continue;
+          }
+          const wakeReason = yield* Effect.raceFirst(
+            Effect.sleep(Duration.nanos(remainingNanos)).pipe(Effect.as("timeout" as const)),
+            Queue.take(ctx.livenessSignals).pipe(Effect.as("activity" as const)),
+          );
+          if (wakeReason === "timeout") {
+            yield* settleStalledTurn(ctx, turnId);
+          }
+        }
+      },
+      Effect.catch(() => Effect.void),
+    );
 
     const sendTurn: ProviderAdapterShape<ProviderAdapterError>["sendTurn"] = (input) =>
       Effect.gen(function* () {
@@ -749,6 +926,12 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
                 updatedAt: yield* nowIso,
                 ...(displayModel ? { model: displayModel } : {}),
               };
+              if (steeringTurnId === undefined) {
+                yield* beginTurnLiveness(ctx, turnId);
+              } else if (ctx.livenessTurnId === turnId) {
+                ctx.lastTurnActivityAtNanos = yield* Clock.monotonicTimeNanos;
+                yield* signalTurnLiveness(ctx, turnId);
+              }
               if (steeringTurnId === undefined) {
                 yield* offerRuntimeEvent({
                   type: "turn.started",
