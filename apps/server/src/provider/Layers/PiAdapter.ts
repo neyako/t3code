@@ -5,7 +5,6 @@ import {
   type ProviderApprovalDecision,
   type ProviderRuntimeEvent,
   type ProviderSession,
-  type ProviderUserInputAnswers,
   ProviderDriverKind,
   ProviderInstanceId,
   RuntimeRequestId,
@@ -764,7 +763,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
               return { acp: ctx.acp, acpSessionId: ctx.acpSessionId, promptParts, turnId };
             }).pipe(
               Effect.tapCause(() =>
-                Effect.gen(function* () {
+                Effect.sync(() => {
                   const liveCtx = sessions.get(input.threadId);
                   if (!liveCtx) {
                     return;

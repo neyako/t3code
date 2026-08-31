@@ -38,7 +38,7 @@ export function buildPiAcpSpawnInput(
     command: piSettings?.binaryPath || "pi-acp",
     args: [],
     cwd,
-    env: { ...(environment ?? {}) },
+    env: { ...environment },
   };
 }
 

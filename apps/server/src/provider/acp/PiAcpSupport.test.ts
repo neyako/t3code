@@ -145,54 +145,54 @@ describe("applyPiAcpReasoningSelection", () => {
   const makeRuntime = (calls: string[]) => ({
     setConfigOption: (configId: string, value: string) => {
       calls.push(`${configId}=${value}`);
-      return Effect.void as never;
+      return Effect.void;
     },
   });
 
-  it("skips the write when no thought_level option exists", async () => {
-    const calls: string[] = [];
-    const result = await Effect.runPromise(
-      applyPiAcpReasoningSelection({
-        runtime: makeRuntime(calls) as never,
+  it.effect("skips the write when no thought_level option exists", () =>
+    Effect.gen(function* () {
+      const calls: string[] = [];
+      const result = yield* applyPiAcpReasoningSelection({
+        runtime: makeRuntime(calls),
         thoughtLevelConfigId: undefined,
         currentReasoning: "high",
         requestedReasoning: "low",
         mapError: (cause) => cause,
-      }),
-    );
-    expect(result).toBe("high");
-    expect(calls).toEqual([]);
-  });
+      });
+      expect(result).toBe("high");
+      expect(calls).toEqual([]);
+    }),
+  );
 
-  it("writes the requested level through setConfigOption", async () => {
-    const calls: string[] = [];
-    const result = await Effect.runPromise(
-      applyPiAcpReasoningSelection({
-        runtime: makeRuntime(calls) as never,
+  it.effect("writes the requested level through setConfigOption", () =>
+    Effect.gen(function* () {
+      const calls: string[] = [];
+      const result = yield* applyPiAcpReasoningSelection({
+        runtime: makeRuntime(calls),
         thoughtLevelConfigId: "thought_level",
         currentReasoning: "high",
         requestedReasoning: "low",
         mapError: (cause) => cause,
-      }),
-    );
-    expect(result).toBe("low");
-    expect(calls).toEqual(["thought_level=low"]);
-  });
+      });
+      expect(result).toBe("low");
+      expect(calls).toEqual(["thought_level=low"]);
+    }),
+  );
 
-  it("skips the write when the level is unchanged", async () => {
-    const calls: string[] = [];
-    const result = await Effect.runPromise(
-      applyPiAcpReasoningSelection({
-        runtime: makeRuntime(calls) as never,
+  it.effect("skips the write when the level is unchanged", () =>
+    Effect.gen(function* () {
+      const calls: string[] = [];
+      const result = yield* applyPiAcpReasoningSelection({
+        runtime: makeRuntime(calls),
         thoughtLevelConfigId: "thought_level",
         currentReasoning: "low",
         requestedReasoning: "low",
         mapError: (cause) => cause,
-      }),
-    );
-    expect(result).toBe("low");
-    expect(calls).toEqual([]);
-  });
+      });
+      expect(result).toBe("low");
+      expect(calls).toEqual([]);
+    }),
+  );
 });
 
 describe("piThinkingLevelsFromCatalogEntries", () => {
@@ -220,10 +220,10 @@ describe("piThinkingLevelsFromCatalogEntries", () => {
 });
 
 describe("applyPiAcpModelSelection", () => {
-  it("returns the current model unchanged when nothing is requested", async () => {
-    let setModelCalls = 0;
-    const result = await Effect.runPromise(
-      applyPiAcpModelSelection({
+  it.effect("returns the current model unchanged when nothing is requested", () =>
+    Effect.gen(function* () {
+      let setModelCalls = 0;
+      const result = yield* applyPiAcpModelSelection({
         runtime: {
           setModel: () => {
             setModelCalls += 1;
@@ -233,16 +233,16 @@ describe("applyPiAcpModelSelection", () => {
         currentModelId: "zai/glm-5.3",
         requestedModelId: undefined,
         mapError: (cause) => cause,
-      }),
-    );
-    expect(result).toBe("zai/glm-5.3");
-    expect(setModelCalls).toBe(0);
-  });
+      });
+      expect(result).toBe("zai/glm-5.3");
+      expect(setModelCalls).toBe(0);
+    }),
+  );
 
-  it("switches via setModel when the requested model differs", async () => {
-    const requested: string[] = [];
-    const result = await Effect.runPromise(
-      applyPiAcpModelSelection({
+  it.effect("switches via setModel when the requested model differs", () =>
+    Effect.gen(function* () {
+      const requested: string[] = [];
+      const result = yield* applyPiAcpModelSelection({
         runtime: {
           setModel: (model: string) => {
             requested.push(model);
@@ -252,9 +252,9 @@ describe("applyPiAcpModelSelection", () => {
         currentModelId: "zai/glm-5.3",
         requestedModelId: "openrouter/foo",
         mapError: (cause) => cause,
-      }),
-    );
-    expect(result).toBe("openrouter/foo");
-    expect(requested).toEqual(["openrouter/foo"]);
-  });
+      });
+      expect(result).toBe("openrouter/foo");
+      expect(requested).toEqual(["openrouter/foo"]);
+    }),
+  );
 });
