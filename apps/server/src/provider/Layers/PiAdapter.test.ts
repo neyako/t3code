@@ -53,6 +53,43 @@ const makeTestAdapter = (binaryPath: string, options?: Parameters<typeof makePiA
   makePiAdapter(decodePiSettings({ binaryPath }), options).pipe(Effect.orDie);
 
 it.layer(piAdapterTestLayer)("PiAdapterLive", (it) => {
+  it.effect("maps ACP usage updates to thread token usage events", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("pi-usage-update");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockPiAcpWrapper({ T3_ACP_EMIT_USAGE_UPDATE: "1" }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+      const usageEvent =
+        yield* Deferred.make<
+          Extract<ProviderRuntimeEvent, { type: "thread.token-usage.updated" }>
+        >();
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        event.type === "thread.token-usage.updated"
+          ? Deferred.succeed(usageEvent, event).pipe(Effect.ignore)
+          : Effect.void,
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("piAgent"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId, input: "report usage", attachments: [] });
+
+      const event = yield* Deferred.await(usageEvent);
+      assert.deepStrictEqual(event.payload.usage, {
+        usedTokens: 123,
+        maxTokens: 1_024,
+      });
+      assert.equal(event.threadId, threadId);
+
+      yield* Fiber.interrupt(runtimeEventsFiber);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
   it.effect("starts a session and maps mock ACP prompt flow to runtime events", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("pi-mock-thread");

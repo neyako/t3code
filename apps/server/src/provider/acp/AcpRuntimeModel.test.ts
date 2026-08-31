@@ -372,6 +372,37 @@ describe("AcpRuntimeModel", () => {
     ]);
   });
 
+  it("projects Pi usage updates into runtime events", () => {
+    const result = parseSessionUpdateEvent({
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "usage_update",
+        used: 123,
+        size: 1_024,
+        cost: { amount: 0.12, currency: "USD" },
+      },
+    } satisfies EffectAcpSchema.SessionNotification);
+
+    expect(result.events).toEqual([
+      {
+        _tag: "UsageUpdated",
+        usage: {
+          usedTokens: 123,
+          maxTokens: 1_024,
+        },
+        rawPayload: {
+          sessionId: "session-1",
+          update: {
+            sessionUpdate: "usage_update",
+            used: 123,
+            size: 1_024,
+            cost: { amount: 0.12, currency: "USD" },
+          },
+        },
+      },
+    ]);
+  });
+
   it("filters malformed available commands and blank input hints", () => {
     const result = parseSessionUpdateEvent({
       sessionId: "session-1",

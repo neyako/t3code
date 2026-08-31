@@ -563,6 +563,30 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
                 if (event._tag === "ModeChanged") {
                   return;
                 }
+                if (event._tag === "UsageUpdated") {
+                  const resolvedTurnId = resolveNotificationTurnId(ctx);
+                  const turnId =
+                    resolvedTurnId !== undefined && !ctx.interruptedTurnIds.has(resolvedTurnId)
+                      ? resolvedTurnId
+                      : undefined;
+                  const stamp = yield* makeEventStamp();
+                  yield* offerRuntimeEvent({
+                    type: "thread.token-usage.updated",
+                    ...stamp,
+                    provider: PROVIDER,
+                    threadId: ctx.threadId,
+                    ...(turnId ? { turnId } : {}),
+                    payload: {
+                      usage: event.usage,
+                    },
+                    raw: {
+                      source: "acp.jsonrpc",
+                      method: "session/update",
+                      payload: event.rawPayload,
+                    },
+                  });
+                  return;
+                }
                 const turnId = resolveNotificationTurnId(ctx);
                 if (turnId === undefined || ctx.interruptedTurnIds.has(turnId)) {
                   return;

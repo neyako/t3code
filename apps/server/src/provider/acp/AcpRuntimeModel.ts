@@ -86,6 +86,14 @@ export type AcpParsedSessionEvent =
       readonly modeId: string;
     }
   | {
+      readonly _tag: "UsageUpdated";
+      readonly usage: {
+        readonly usedTokens: number;
+        readonly maxTokens: number;
+      };
+      readonly rawPayload: unknown;
+    }
+  | {
       readonly _tag: "AssistantItemStarted";
       readonly itemId: string;
     }
@@ -831,6 +839,19 @@ export function parseSessionUpdateEvent(params: EffectAcpSchema.SessionNotificat
       events.push({
         _tag: "AvailableCommandsUpdated",
         availableCommands,
+        rawPayload: params,
+      });
+      break;
+    }
+    case "usage_update": {
+      const used = Math.max(0, Math.floor(upd.used));
+      const size = Math.max(0, Math.floor(upd.size));
+      if (size <= 0) {
+        break;
+      }
+      events.push({
+        _tag: "UsageUpdated",
+        usage: { usedTokens: used, maxTokens: size },
         rawPayload: params,
       });
       break;
