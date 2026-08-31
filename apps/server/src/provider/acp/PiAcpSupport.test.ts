@@ -1,5 +1,6 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import type * as AcpSessionRuntime from "../../provider/acp/AcpSessionRuntime.ts";
 
 import {
   applyPiAcpModelSelection,
@@ -142,12 +143,13 @@ describe("piReasoningOptionsFromThoughtLevels", () => {
 });
 
 describe("applyPiAcpReasoningSelection", () => {
-  const makeRuntime = (calls: string[]) => ({
-    setConfigOption: (configId: string, value: string) => {
-      calls.push(`${configId}=${value}`);
-      return Effect.void;
-    },
-  });
+  const makeRuntime = (calls: string[]) =>
+    ({
+      setConfigOption: (configId: string, value: string) => {
+        calls.push(`${configId}=${value}`);
+        return Effect.void;
+      },
+    }) as unknown as Pick<AcpSessionRuntime.AcpSessionRuntime["Service"], "setConfigOption">;
 
   it.effect("skips the write when no thought_level option exists", () =>
     Effect.gen(function* () {
