@@ -848,6 +848,11 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
               const requestedTurnModelId = turnModelSelection?.model
                 ? resolvePiAcpBaseModelId(turnModelSelection.model)
                 : undefined;
+              // Pi ACP treats slash commands (notably `/compact`) as control
+              // messages. Do not negotiate model/config options for these
+              // commands: resumed sessions may advertise stale config shapes,
+              // and the command must reach pi unchanged.
+              const isCompactCommand = /^\/compact(?:\s|$)/u.test(input.input?.trim() ?? "");
 
               const text = input.input?.trim();
               // pi ingests images only; generic files reach the agent through
@@ -900,7 +905,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
               const currentModelId = yield* applyPiAcpModelSelection({
                 runtime: ctx.acp,
                 currentModelId: ctx.currentModelId,
-                requestedModelId: requestedTurnModelId,
+                requestedModelId: isCompactCommand ? undefined : requestedTurnModelId,
                 mapError: (cause) =>
                   mapAcpToAdapterError(
                     PROVIDER,
@@ -918,7 +923,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
                 runtime: ctx.acp,
                 thoughtLevelConfigId: ctx.thoughtLevelConfigId,
                 currentReasoning: ctx.currentReasoning,
-                requestedReasoning: requestedTurnReasoning,
+                requestedReasoning: isCompactCommand ? undefined : requestedTurnReasoning,
                 mapError: (cause) =>
                   mapAcpToAdapterError(
                     PROVIDER,

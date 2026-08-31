@@ -45,6 +45,15 @@ exec ${JSON.stringify(mockAgentCommand)} ${JSON.stringify(mockAgentPath)} "$@"
   return wrapperPath;
 }
 
+async function readRequestLog(path: string): Promise<Array<{ method?: string; params?: unknown }>> {
+  const text = await NodeFSP.readFile(path, "utf8");
+  return text
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as { method?: string; params?: unknown });
+}
+
 const piAdapterTestLayer = ServerConfig.layerTest(process.cwd(), {
   prefix: "t3code-pi-adapter-test-",
 }).pipe(Layer.provideMerge(NodeServices.layer));
@@ -158,6 +167,47 @@ it.layer(piAdapterTestLayer)("PiAdapterLive", (it) => {
       assert.isTrue(yield* adapter.hasSession(threadId));
       yield* adapter.stopSession(threadId);
       assert.isFalse(yield* adapter.hasSession(threadId));
+    }),
+  );
+
+  it.effect("sends /compact as a Pi ACP prompt command", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("pi-compact-command");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "pi-compact-test-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockPiAcpWrapper({
+          T3_ACP_REQUEST_LOG_PATH: requestLogPath,
+          T3_ACP_FAIL_SET_CONFIG_OPTION: "1",
+        }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("piAgent"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "/compact",
+        attachments: [],
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("piAgent"),
+          model: "pi-default",
+        },
+      });
+
+      const requests = yield* Effect.promise(() => readRequestLog(requestLogPath));
+      const prompt = requests.find((request) => request.method === "session/prompt");
+      assert.isFalse(requests.some((request) => request.method === "session/set_config_option"));
+      assert.deepStrictEqual(prompt?.params, {
+        sessionId: "mock-session-1",
+        prompt: [{ type: "text", text: "/compact" }],
+      });
+      yield* adapter.stopSession(threadId);
     }),
   );
 
