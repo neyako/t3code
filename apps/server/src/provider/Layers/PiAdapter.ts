@@ -73,6 +73,7 @@ const PROVIDER = ProviderDriverKind.make("piAgent");
 const PI_RESUME_VERSION = 1 as const;
 const NANOS_PER_MILLI = 1_000_000n;
 const DEFAULT_PI_TURN_INACTIVITY_TIMEOUT_MS = 10 * 60 * 1_000;
+const PI_COMPACT_NOOP_MESSAGE = "Nothing to compact (session too small)";
 
 function encodeJsonStringForDiagnostics(input: unknown): string | undefined {
   const result = encodeUnknownJsonStringExit(input);
@@ -972,7 +973,13 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
                 });
               }
 
-              return { acp: ctx.acp, acpSessionId: ctx.acpSessionId, promptParts, turnId };
+              return {
+                acp: ctx.acp,
+                acpSessionId: ctx.acpSessionId,
+                compactCommand: isCompactCommand,
+                promptParts,
+                turnId,
+              };
             }).pipe(
               Effect.tapCause(() =>
                 Effect.sync(() => {
@@ -1004,6 +1011,33 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
             Effect.mapError((error) =>
               mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", error),
             ),
+            Effect.catchTag("ProviderAdapterRequestError", (error) => {
+              if (!prepared.compactCommand || !/nothing to compact/iu.test(error.detail)) {
+                return Effect.fail(error);
+              }
+              return Effect.gen(function* () {
+                const ctx = yield* requireSession(input.threadId);
+                ctx.turnsWithAssistantContent.add(prepared.turnId);
+                const promptResult = {
+                  stopReason: "end_turn",
+                } satisfies EffectAcpSchema.PromptResponse;
+                yield* Ref.set(promptResultRef, promptResult);
+                yield* offerRuntimeEvent(
+                  makeAcpContentDeltaEvent({
+                    stamp: yield* makeEventStamp(),
+                    provider: PROVIDER,
+                    threadId: input.threadId,
+                    turnId: prepared.turnId,
+                    text: PI_COMPACT_NOOP_MESSAGE,
+                    rawPayload: {
+                      source: "pi.compact",
+                      detail: error.detail,
+                    },
+                  }),
+                );
+                return promptResult;
+              });
+            }),
           );
 
           return yield* withThreadLock(

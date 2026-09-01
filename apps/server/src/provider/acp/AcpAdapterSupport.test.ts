@@ -25,4 +25,19 @@ describe("AcpAdapterSupport", () => {
     expect(error._tag).toBe("ProviderAdapterRequestError");
     expect(error.message).toContain("Invalid params");
   });
+
+  it("keeps ACP error details in provider adapter request errors", () => {
+    const error = mapAcpToAdapterError(
+      ProviderDriverKind.make("piAgent"),
+      "thread-1" as never,
+      "session/prompt",
+      new EffectAcpErrors.AcpRequestError({
+        code: -32603,
+        errorMessage: "Internal error",
+        data: { details: "Nothing to compact (session too small)" },
+      }),
+    );
+
+    expect(error.message).toContain("Nothing to compact (session too small)");
+  });
 });

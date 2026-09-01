@@ -211,6 +211,50 @@ it.layer(piAdapterTestLayer)("PiAdapterLive", (it) => {
     }),
   );
 
+  it.effect("surfaces a no-op /compact as a visible completed message", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("pi-compact-noop");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockPiAcpWrapper({ T3_ACP_FAIL_COMPACT: "1" }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+      const runtimeEvents: ProviderRuntimeEvent[] = [];
+      const turnCompleted =
+        yield* Deferred.make<Extract<ProviderRuntimeEvent, { type: "turn.completed" }>>();
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.gen(function* () {
+          if (String(event.threadId) !== String(threadId)) return;
+          runtimeEvents.push(event);
+          if (event.type === "turn.completed") {
+            yield* Deferred.succeed(turnCompleted, event).pipe(Effect.ignore);
+          }
+        }),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("piAgent"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId, input: "/compact", attachments: [] });
+
+      const completed = yield* Deferred.await(turnCompleted);
+      assert.deepStrictEqual(completed.payload, {
+        state: "completed",
+        stopReason: "end_turn",
+      });
+      const delta = runtimeEvents.find((event) => event.type === "content.delta");
+      assert.equal(
+        delta?.type === "content.delta" ? delta.payload.delta : undefined,
+        "Nothing to compact (session too small)",
+      );
+
+      yield* Fiber.interrupt(runtimeEventsFiber);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
   it.effect("fails a Pi turn that stalls without ACP progress", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("pi-watchdog-silent-turn");
