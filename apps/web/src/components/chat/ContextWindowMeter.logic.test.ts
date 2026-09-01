@@ -3,6 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { deriveProviderInstanceEntries } from "../../providerInstances";
 import {
   formatContextWindowCompactionMessage,
+  hasAvailableCompactionProvider,
   hasAvailableClaudeCompactionProvider,
   hasDismissedResumeCompaction,
   resolveContextWindowModelDisplayName,
@@ -73,6 +74,35 @@ describe("hasAvailableClaudeCompactionProvider", () => {
         providers,
         instanceId: originalInstanceId,
         lockedInstanceId: originalInstanceId,
+      }),
+    ).toBe(true);
+  });
+});
+
+describe("hasAvailableCompactionProvider", () => {
+  it("accepts an available Pi provider", () => {
+    const providers = deriveProviderInstanceEntries([
+      {
+        instanceId: ProviderInstanceId.make("pi-main"),
+        driver: ProviderDriverKind.make("piAgent"),
+        enabled: true,
+        installed: true,
+        version: null,
+        status: "ready",
+        auth: { status: "authenticated" },
+        checkedAt: "2026-08-24T12:00:00.000Z",
+        models: [],
+        slashCommands: [],
+        skills: [],
+      },
+    ]);
+
+    expect(
+      hasAvailableCompactionProvider({
+        providers,
+        driverKind: ProviderDriverKind.make("piAgent"),
+        instanceId: ProviderInstanceId.make("pi-main"),
+        lockedInstanceId: null,
       }),
     ).toBe(true);
   });

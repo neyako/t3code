@@ -4250,7 +4250,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       compactDisabled || noProviderAvailable || isSendBusy || isConnecting
                     }
                     compactDisabledReason={resolvedCompactDisabledReason}
-                    {...(selectedProvider === "claudeAgent"
+                    {...(selectedProvider === "claudeAgent" || selectedProvider === "piAgent"
                       ? { onCompactContext: compactThreadContext }
                       : {})}
                   />

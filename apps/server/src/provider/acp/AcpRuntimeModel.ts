@@ -86,6 +86,14 @@ export type AcpParsedSessionEvent =
       readonly modeId: string;
     }
   | {
+      readonly _tag: "UsageUpdated";
+      readonly usage: {
+        readonly usedTokens: number;
+        readonly maxTokens: number;
+      };
+      readonly rawPayload: unknown;
+    }
+  | {
       readonly _tag: "AssistantItemStarted";
       readonly itemId: string;
     }
@@ -96,6 +104,11 @@ export type AcpParsedSessionEvent =
   | {
       readonly _tag: "PlanUpdated";
       readonly payload: AcpPlanUpdate;
+      readonly rawPayload: unknown;
+    }
+  | {
+      readonly _tag: "AvailableCommandsUpdated";
+      readonly availableCommands: ReadonlyArray<EffectAcpSchema.AvailableCommand>;
       readonly rawPayload: unknown;
     }
   | {
@@ -236,6 +249,38 @@ function normalizeCommandValue(value: unknown): string | undefined {
     }
   }
   return parts.length > 0 ? parts.join(" ") : undefined;
+}
+
+function normalizeAvailableCommands(
+  value: unknown,
+): ReadonlyArray<EffectAcpSchema.AvailableCommand> {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((entry) => {
+    if (
+      !isRecord(entry) ||
+      typeof entry.name !== "string" ||
+      typeof entry.description !== "string"
+    ) {
+      return [];
+    }
+    const name = entry.name.trim();
+    if (!name) {
+      return [];
+    }
+    const hint =
+      "input" in entry && isRecord(entry.input) && typeof entry.input.hint === "string"
+        ? entry.input.hint.trim()
+        : undefined;
+    const command: EffectAcpSchema.AvailableCommand = {
+      name,
+      description: entry.description.trim(),
+      ...(hint ? { input: { hint } } : {}),
+      ...(entry._meta === null || isRecord(entry._meta) ? { _meta: entry._meta } : {}),
+    };
+    return [command];
+  });
 }
 
 function extractCommandFromTitle(title: string | undefined): string | undefined {
@@ -787,6 +832,28 @@ export function parseSessionUpdateEvent(params: EffectAcpSchema.SessionNotificat
           rawPayload: params,
         });
       }
+      break;
+    }
+    case "available_commands_update": {
+      const availableCommands = normalizeAvailableCommands(upd.availableCommands);
+      events.push({
+        _tag: "AvailableCommandsUpdated",
+        availableCommands,
+        rawPayload: params,
+      });
+      break;
+    }
+    case "usage_update": {
+      const used = Math.max(0, Math.floor(upd.used));
+      const size = Math.max(0, Math.floor(upd.size));
+      if (size <= 0) {
+        break;
+      }
+      events.push({
+        _tag: "UsageUpdated",
+        usage: { usedTokens: used, maxTokens: size },
+        rawPayload: params,
+      });
       break;
     }
     case "tool_call": {

@@ -28,10 +28,18 @@ export function mapAcpToAdapterError(
     });
   }
   if (isAcpRequestError(error)) {
+    const details =
+      typeof error.data === "object" &&
+      error.data !== null &&
+      !Array.isArray(error.data) &&
+      "details" in error.data &&
+      typeof error.data.details === "string"
+        ? error.data.details
+        : undefined;
     return new ProviderAdapterRequestError({
       provider,
       method,
-      detail: error.message,
+      detail: details ? `${error.message}: ${details}` : error.message,
       cause: error,
     });
   }

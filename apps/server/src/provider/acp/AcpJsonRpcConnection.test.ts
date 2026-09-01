@@ -116,6 +116,48 @@ describe("AcpSessionRuntime", () => {
     ),
   );
 
+  it.effect("buffers available commands emitted while session startup is in progress", () =>
+    Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+      const started = yield* runtime.start();
+      expect(started.sessionId).toBe("mock-session-1");
+
+      const notes = Array.from(yield* Stream.runCollect(Stream.take(runtime.getEvents(), 1)));
+      expect(notes).toEqual([
+        {
+          _tag: "AvailableCommandsUpdated",
+          availableCommands: [
+            { name: "plan", description: "Create a plan", input: { hint: "topic" } },
+          ],
+          rawPayload: {
+            sessionId: "mock-session-1",
+            update: {
+              sessionUpdate: "available_commands_update",
+              availableCommands: [
+                { name: "plan", description: "Create a plan", input: { hint: "topic" } },
+              ],
+            },
+          },
+        },
+      ]);
+    }).pipe(
+      Effect.provide(
+        AcpSessionRuntime.layer({
+          spawn: {
+            command: mockAgentCommand,
+            args: mockAgentArgs,
+            env: { T3_ACP_EMIT_AVAILABLE_COMMANDS_DURING_CREATE: "1" },
+          },
+          cwd: process.cwd(),
+          clientInfo: { name: "t3-test", version: "0.0.0" },
+          authMethodId: "test",
+        }),
+      ),
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+    ),
+  );
+
   it.effect("keeps assistant item IDs unique when a provider session restarts", () => {
     const collectFirstAssistantItemId = Effect.gen(function* () {
       const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;

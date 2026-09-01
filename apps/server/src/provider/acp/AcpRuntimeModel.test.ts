@@ -339,6 +339,107 @@ describe("AcpRuntimeModel", () => {
     ]);
   });
 
+  it("projects available ACP commands and preserves input hints", () => {
+    const result = parseSessionUpdateEvent({
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "available_commands_update",
+        availableCommands: [
+          { name: " plan ", description: " Create a plan ", input: { hint: " topic " } },
+          { name: "status", description: " Show status" },
+        ],
+      },
+    } satisfies EffectAcpSchema.SessionNotification);
+
+    expect(result.events).toEqual([
+      {
+        _tag: "AvailableCommandsUpdated",
+        availableCommands: [
+          { name: "plan", description: "Create a plan", input: { hint: "topic" } },
+          { name: "status", description: "Show status" },
+        ],
+        rawPayload: {
+          sessionId: "session-1",
+          update: {
+            sessionUpdate: "available_commands_update",
+            availableCommands: [
+              { name: " plan ", description: " Create a plan ", input: { hint: " topic " } },
+              { name: "status", description: " Show status" },
+            ],
+          },
+        },
+      },
+    ]);
+  });
+
+  it("projects Pi usage updates into runtime events", () => {
+    const result = parseSessionUpdateEvent({
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "usage_update",
+        used: 123,
+        size: 1_024,
+        cost: { amount: 0.12, currency: "USD" },
+      },
+    } satisfies EffectAcpSchema.SessionNotification);
+
+    expect(result.events).toEqual([
+      {
+        _tag: "UsageUpdated",
+        usage: {
+          usedTokens: 123,
+          maxTokens: 1_024,
+        },
+        rawPayload: {
+          sessionId: "session-1",
+          update: {
+            sessionUpdate: "usage_update",
+            used: 123,
+            size: 1_024,
+            cost: { amount: 0.12, currency: "USD" },
+          },
+        },
+      },
+    ]);
+  });
+
+  it("filters malformed available commands and blank input hints", () => {
+    const result = parseSessionUpdateEvent({
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "available_commands_update",
+        availableCommands: [
+          { name: " ", description: "ignored" },
+          { name: "missing-description" } as never,
+          { name: "bad-description", description: 42 } as never,
+          { name: "blank-hint", description: "kept", input: { hint: "  " } },
+          null,
+          "not-a-command",
+        ] as never,
+      },
+    } as EffectAcpSchema.SessionNotification);
+
+    expect(result.events).toEqual([
+      {
+        _tag: "AvailableCommandsUpdated",
+        availableCommands: [{ name: "blank-hint", description: "kept" }],
+        rawPayload: expect.anything(),
+      },
+    ]);
+  });
+
+  it("leaves existing session update parsing unchanged", () => {
+    const result = parseSessionUpdateEvent({
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "current_mode_update",
+        currentModeId: " code ",
+      },
+    } satisfies EffectAcpSchema.SessionNotification);
+
+    expect(result.events).toEqual([{ _tag: "ModeChanged", modeId: "code" }]);
+  });
+
   it("keeps permission request parsing compatible with loose extension payloads", () => {
     const request = parsePermissionRequest({
       sessionId: "session-1",

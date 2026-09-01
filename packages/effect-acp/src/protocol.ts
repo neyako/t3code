@@ -77,10 +77,54 @@ const decodeElicitationComplete = Schema.decodeUnknownEffect(
 );
 const parserFactory = RpcSerialization.ndJsonRpc();
 
+type PlainJsonRpcError = {
+  readonly code: number;
+  readonly message: string;
+  readonly data?: unknown;
+};
+
+function collectPlainJsonRpcErrors(frame: unknown, errors: Map<string, PlainJsonRpcError>): void {
+  if (Array.isArray(frame)) {
+    for (const item of frame) collectPlainJsonRpcErrors(item, errors);
+    return;
+  }
+  if (typeof frame !== "object" || frame === null || !("error" in frame)) {
+    return;
+  }
+  const response = frame as { readonly id?: string | number | null; readonly error?: unknown };
+  if (response.id === undefined || response.id === null || !isProtocolError(response.error)) {
+    return;
+  }
+  if (typeof response.error === "object" && response.error !== null && "_tag" in response.error) {
+    return;
+  }
+  errors.set(String(response.id), response.error);
+}
+
 export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(function* (
   options: AcpPatchedProtocolOptions,
 ): Effect.fn.Return<AcpPatchedProtocol, never, Scope.Scope> {
   const parser = parserFactory.makeUnsafe();
+  const rawInputDecoder = new TextDecoder();
+  let rawInputBuffer = "";
+  const plainJsonRpcErrors = new Map<string, PlainJsonRpcError>();
+  const inspectRawInput = (data: Uint8Array | string): void => {
+    rawInputBuffer +=
+      typeof data === "string" ? data : rawInputDecoder.decode(data, { stream: true });
+    let newlineIndex = rawInputBuffer.indexOf("\n");
+    while (newlineIndex !== -1) {
+      const line = rawInputBuffer.slice(0, newlineIndex);
+      rawInputBuffer = rawInputBuffer.slice(newlineIndex + 1);
+      if (line.includes('"error"')) {
+        try {
+          collectPlainJsonRpcErrors(JSON.parse(line), plainJsonRpcErrors);
+        } catch {
+          // The ACP parser below owns malformed-frame handling.
+        }
+      }
+      newlineIndex = rawInputBuffer.indexOf("\n");
+    }
+  };
   const serverQueue = yield* Queue.unbounded<RpcMessage.FromClientEncoded>();
   const clientQueue = yield* Queue.unbounded<RpcMessage.FromServerEncoded>();
   const notificationQueue = yield* Queue.unbounded<AcpIncomingNotification>();
@@ -339,8 +383,19 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
     return Queue.offer(serverQueue, message).pipe(Effect.asVoid);
   };
 
-  const handleExitEncoded = (message: RpcMessage.ResponseExitEncoded) =>
-    Ref.get(extPending).pipe(
+  const handleExitEncoded = (message: RpcMessage.ResponseExitEncoded) => {
+    const plainError = plainJsonRpcErrors.get(String(message.requestId));
+    if (plainError !== undefined) {
+      plainJsonRpcErrors.delete(String(message.requestId));
+      message = {
+        ...message,
+        exit: {
+          _tag: "Failure",
+          cause: [{ _tag: "Fail", error: plainError }],
+        },
+      };
+    }
+    return Ref.get(extPending).pipe(
       Effect.flatMap((pending) => {
         const pendingRequest = pending.get(String(message.requestId));
         if (!pendingRequest) {
@@ -370,6 +425,7 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
         );
       }),
     );
+  };
 
   const routeDecodedMessage = (
     message: RpcMessage.FromClientEncoded | RpcMessage.FromServerEncoded,
@@ -408,11 +464,14 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
 
   yield* options.stdio.stdin.pipe(
     Stream.runForEach((data) =>
-      logProtocol({
-        direction: "incoming",
-        stage: "raw",
-        payload: typeof data === "string" ? data : new TextDecoder().decode(data),
-      }).pipe(
+      Effect.sync(() => inspectRawInput(data)).pipe(
+        Effect.andThen(
+          logProtocol({
+            direction: "incoming",
+            stage: "raw",
+            payload: typeof data === "string" ? data : new TextDecoder().decode(data),
+          }),
+        ),
         Effect.flatMap(() =>
           Effect.try({
             try: () =>

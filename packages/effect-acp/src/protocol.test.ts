@@ -348,19 +348,9 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
             jsonrpc: "2.0",
             id: 1,
             error: {
-              _tag: "Cause",
               code: -32602,
               message: "Invalid params",
-              data: [
-                {
-                  _tag: "Fail",
-                  error: {
-                    code: -32602,
-                    message: "Invalid params",
-                    data: { field: "hello" },
-                  },
-                },
-              ],
+              data: { field: "hello" },
             },
           })}\n`,
         ),
@@ -379,6 +369,7 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
         method: "x/private",
         requestId: 1,
         operation: "receive-response",
+        data: { field: "hello" },
       });
     }),
   );
