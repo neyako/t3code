@@ -76,6 +76,7 @@ const decodeElicitationComplete = Schema.decodeUnknownEffect(
   AcpSchema.ElicitationCompleteNotification,
 );
 const parserFactory = RpcSerialization.ndJsonRpc();
+const MAX_BUFFERED_RAW_NOTIFICATIONS = 32;
 
 type PlainJsonRpcError = {
   readonly code: number;
@@ -127,7 +128,9 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
   };
   const serverQueue = yield* Queue.unbounded<RpcMessage.FromClientEncoded>();
   const clientQueue = yield* Queue.unbounded<RpcMessage.FromServerEncoded>();
-  const notificationQueue = yield* Queue.unbounded<AcpIncomingNotification>();
+  const notificationQueue = yield* Queue.sliding<AcpIncomingNotification>(
+    MAX_BUFFERED_RAW_NOTIFICATIONS,
+  );
   const disconnects = yield* Queue.unbounded<number>();
   const outgoing = yield* Queue.unbounded<string | Uint8Array, Cause.Done<void>>();
   const nextRequestId = yield* Ref.make(1);
@@ -466,11 +469,13 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
     Stream.runForEach((data) =>
       Effect.sync(() => inspectRawInput(data)).pipe(
         Effect.andThen(
-          logProtocol({
-            direction: "incoming",
-            stage: "raw",
-            payload: typeof data === "string" ? data : new TextDecoder().decode(data),
-          }),
+          options.logIncoming
+            ? logProtocol({
+                direction: "incoming",
+                stage: "raw",
+                payload: typeof data === "string" ? data : new TextDecoder().decode(data),
+              })
+            : Effect.void,
         ),
         Effect.flatMap(() =>
           Effect.try({
