@@ -88,6 +88,7 @@ import type {
   OrchestrationThreadStreamItem,
 } from "./orchestration.ts";
 import { EnvironmentId } from "./baseSchemas.ts";
+import { BrowserProfileId } from "./browserProfile.ts";
 import { AuthAccessTokenResult, AuthSessionState, AuthWebSocketTicketResult } from "./auth.ts";
 import { AdvertisedEndpoint } from "./remoteAccess.ts";
 import { ExecutionEnvironmentDescriptor } from "./environment.ts";
@@ -209,6 +210,7 @@ export interface DesktopUpdateState {
   availableVersion: string | null;
   downloadedVersion: string | null;
   releaseNotes: ReadonlyArray<DesktopUpdateReleaseNote>;
+  omittedReleaseCount: number;
   downloadPercent: number | null;
   checkedAt: string | null;
   message: string | null;
@@ -219,11 +221,13 @@ export interface DesktopUpdateState {
 export interface DesktopUpdateReleaseNote {
   version: string;
   items: ReadonlyArray<string>;
+  totalItems: number;
 }
 
 export const DesktopUpdateReleaseNoteSchema = Schema.Struct({
   version: Schema.String,
   items: Schema.Array(Schema.String),
+  totalItems: Schema.Number,
 });
 
 export const DesktopUpdateStateSchema = Schema.Struct({
@@ -237,6 +241,7 @@ export const DesktopUpdateStateSchema = Schema.Struct({
   availableVersion: Schema.NullOr(Schema.String),
   downloadedVersion: Schema.NullOr(Schema.String),
   releaseNotes: Schema.Array(DesktopUpdateReleaseNoteSchema),
+  omittedReleaseCount: Schema.Number,
   downloadPercent: Schema.NullOr(Schema.Number),
   checkedAt: Schema.NullOr(Schema.String),
   message: Schema.NullOr(Schema.String),
@@ -970,6 +975,19 @@ export const DesktopPreviewNavigateInputSchema = Schema.Struct({
 
 export const DesktopPreviewConfigInputSchema = Schema.Struct({
   environmentId: EnvironmentId,
+  /**
+   * Browser profile the partition is derived from. Derivation stays in main:
+   * `will-attach-webview` only prefix-checks the partition string, so a
+   * renderer-supplied partition could attach to a session that never had the
+   * UA rewrite or permission handlers installed.
+   */
+  profileId: Schema.optional(BrowserProfileId),
+});
+
+export const DesktopPreviewClearDataInputSchema = Schema.Struct({
+  environmentId: EnvironmentId,
+  /** Omit to clear every profile; otherwise only this profile's partition. */
+  profileId: Schema.optional(BrowserProfileId),
 });
 
 export const DesktopPreviewSetColorSchemeInputSchema = Schema.Struct({
@@ -1154,16 +1172,19 @@ export interface DesktopPreviewBridge {
   /** Open the guest webview's DevTools (detached). */
   openDevTools: (tabId: string) => Promise<void>;
   /** Drop cookies + storage data for the preview partition (all tabs). */
-  clearCookies: () => Promise<void>;
+  clearCookies: (environmentId: EnvironmentId, profileId?: string) => Promise<void>;
   /** Drop the HTTP cache for the preview partition (all tabs). */
-  clearCache: () => Promise<void>;
+  clearCache: (environmentId: EnvironmentId, profileId?: string) => Promise<void>;
   /**
    * One-shot config for mounting a preview `<webview>`. Replaces three
    * earlier round-trip calls (`getBrowserPartition`, `getWebviewPreferences`,
    * `getPickPreloadPath`) so adding a new field here only requires touching
    * the contract + main, not the renderer's mount logic.
    */
-  getPreviewConfig: (environmentId: EnvironmentId) => Promise<DesktopPreviewWebviewConfig>;
+  getPreviewConfig: (
+    environmentId: EnvironmentId,
+    profileId?: string,
+  ) => Promise<DesktopPreviewWebviewConfig>;
   setAnnotationTheme: (theme: DesktopPreviewAnnotationTheme) => Promise<void>;
   /**
    * Activate the in-page element picker for the given tab. Resolves with

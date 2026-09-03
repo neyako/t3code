@@ -15,6 +15,9 @@ export const AssetResource = Schema.Union([
     threadId: ThreadId,
     path: TrimmedNonEmptyString.check(Schema.isMaxLength(ASSET_PATH_MAX_LENGTH)),
   }),
+  // One file served in place from anywhere the environment host can read:
+  // images, videos, HTML, and PDF. An absolute path may lie outside the
+  // workspace; a relative one resolves against the thread's workspace.
   Schema.TaggedStruct("media-file", {
     threadId: ThreadId,
     path: TrimmedNonEmptyString.check(Schema.isMaxLength(ASSET_PATH_MAX_LENGTH)),
@@ -27,6 +30,9 @@ export const AssetResource = Schema.Union([
         an octet-stream download without a filename. */
     fileName: Schema.optionalKey(TrimmedNonEmptyString.check(Schema.isMaxLength(255))),
     mimeType: Schema.optionalKey(TrimmedNonEmptyString.check(Schema.isMaxLength(100))),
+    /** Generic attachments download by default. Document viewers opt into an
+        inline response after deciding the file type is safe to preview. */
+    disposition: Schema.optionalKey(Schema.Literals(["inline", "attachment"])),
   }),
   Schema.TaggedStruct("project-favicon", {
     cwd: TrimmedNonEmptyString.check(Schema.isMaxLength(ASSET_PATH_MAX_LENGTH)),
@@ -157,7 +163,7 @@ export class AssetPreviewTypeValidationError extends Schema.TaggedErrorClass<Ass
 ) {
   override get message(): string {
     return this.resource._tag === "media-file"
-      ? "Only images and videos can be previewed."
+      ? "Only images, videos, HTML, and PDF files can be previewed."
       : "Only browser documents and images can be previewed.";
   }
 }

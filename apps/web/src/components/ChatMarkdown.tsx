@@ -70,6 +70,8 @@ import { defaultUrlTransform } from "react-markdown";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkBreaks from "remark-breaks";
+import { parseAssistantCitationHref } from "@t3tools/shared/assistantCitations";
+import { AssistantCitationChip } from "./chat/AssistantCitationChip";
 import remarkGfm from "remark-gfm";
 import { remarkGithubAlerts } from "../markdown-github-alerts";
 import {
@@ -164,7 +166,7 @@ import {
 } from "~/lib/openPullRequestLink";
 import { writeTextToClipboard } from "../hooks/useCopyToClipboard";
 import { isPreviewSupportedInRuntime } from "../previewStateStore";
-import { resolvePathLinkTarget } from "../terminal-links";
+import { isAbsolutePath, resolvePathLinkTarget } from "../terminal-links";
 import {
   isBrowserPreviewFile,
   openFileInPreview,
@@ -188,6 +190,8 @@ interface ChatMarkdownProps {
   parseRawHtml?: boolean;
   /** Append a prompt that invokes a newly created artifact-template skill. */
   onUseArtifactTemplate?: ((template: CodexArtifactTemplate) => void) | undefined;
+  /** Directory that anchors relative links and images; defaults to `cwd`. Set
+      to the file's own directory when rendering a markdown file. */
   imageBaseDir?: string | undefined;
   onImageExpand?: ((preview: ExpandedImagePreview) => void) | undefined;
   extraRemarkPlugins?: NonNullable<ReactMarkdownOptions["remarkPlugins"]>;
@@ -324,13 +328,10 @@ function findTaskListMarkerOffset(markdown: string, listItemStart: number): numb
 }
 
 /**
- * The default `1.25rem` marker gutter (`.chat-markdown ol`) fits markers up to
- * two characters wide. Once a marker reaches three characters (item 100+),
- * `list-style-position: outside` paints it wider than that gutter and clips
- * the leading character against the item's own overflow. Rather than widening
- * the gutter for every list, only lists whose widest marker is 3+ characters
- * get a wider `--list-gutter`. The width includes a negative marker's minus
- * sign.
+ * The default `1.25rem` marker gutter (`.chat-markdown ol`) fits one-character
+ * markers. Wider markers can extend past it and get clipped by a collapsed
+ * message's overflow. Widen the gutter to fit the widest marker, including a
+ * negative marker's minus sign.
  */
 export function orderedListGutterStyle(
   itemCount: number,
@@ -340,7 +341,7 @@ export function orderedListGutterStyle(
   const firstNumber = Number.isNaN(parsedStart) ? 1 : parsedStart;
   const lastNumber = firstNumber + Math.max(itemCount - 1, 0);
   const markerWidth = Math.max(String(firstNumber).length, String(lastNumber).length);
-  if (markerWidth <= 2) return undefined;
+  if (markerWidth <= 1) return undefined;
   return { "--list-gutter": `${markerWidth + 1}ch` };
 }
 
@@ -384,7 +385,7 @@ const CHAT_MARKDOWN_SANITIZE_SCHEMA = {
   },
   protocols: {
     ...defaultSchema.protocols,
-    href: [...(defaultSchema.protocols?.href ?? []), "file"],
+    href: [...(defaultSchema.protocols?.href ?? []), "file", "t3-citation"],
     src: [...(defaultSchema.protocols?.src ?? []), "file"],
   },
 } satisfies Parameters<typeof rehypeSanitize>[0];
@@ -1017,14 +1018,16 @@ interface MarkdownFileLinkProps {
   targetPath: string;
   iconPath: string;
   displayPath: string;
-  workspaceRelativePath: string | null;
+  /** What the files panel opens: workspace-relative inside the workspace, the
+      absolute host path outside it, null when the panel cannot show the file. */
+  panelPath: string | null;
   line?: number | undefined;
   label: string;
   copyMarkdown: string;
   theme: "light" | "dark";
   threadRef?: ScopedThreadRef | undefined;
   onOpen?: ((targetPath: string) => Promise<AtomCommandResult<unknown, unknown>>) | undefined;
-  onOpenInPanel: (workspaceRelativePath: string, line: number | undefined) => void;
+  onOpenInPanel: (panelPath: string, line: number | undefined) => void;
   openInEditorMenuLabel: string;
   onOpenInBrowser?: (() => Promise<AtomCommandResult<unknown, unknown>>) | undefined;
   onOpenMedia?: (() => void) | undefined;
@@ -1271,7 +1274,6 @@ function ChatMarkdownVideo(props: {
   readonly mediaIdentity?: string | undefined;
   readonly actionsSource?: MediaActionSource | undefined;
   readonly onRetry?: (() => Promise<void>) | undefined;
-  readonly onImageExpand?: ((preview: ExpandedImagePreview) => void) | undefined;
 }) {
   return (
     <MediaVideoPlayer
@@ -1293,27 +1295,6 @@ function ChatMarkdownVideo(props: {
       )}
       onRetry={props.onRetry}
       actionsSource={props.actionsSource}
-      onExpand={
-        props.onImageExpand
-          ? (src) => {
-              props.onImageExpand?.({
-                images: [
-                  {
-                    src,
-                    name: props.alt || "video",
-                    type: "video",
-                    autoPlay: false,
-                    ...(props.originalUrl ? { originalUrl: props.originalUrl } : {}),
-                    ...(props.actionsSource
-                      ? { actionsSource: { ...props.actionsSource, src } }
-                      : {}),
-                  },
-                ],
-                index: 0,
-              });
-            }
-          : undefined
-      }
     />
   );
 }
@@ -1375,7 +1356,6 @@ export const ChatMarkdownAssetImage = memo(function ChatMarkdownAssetImage(props
         style={props.style}
         mediaIdentity={JSON.stringify([props.environmentId, props.resource, props.srcFragment])}
         onRetry={refreshAssetUrl}
-        onImageExpand={props.onImageExpand}
         actionsSource={actionsSource}
       />
     );
@@ -1603,7 +1583,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
   targetPath,
   iconPath,
   displayPath,
-  workspaceRelativePath,
+  panelPath,
   line,
   label,
   copyMarkdown,
@@ -1657,8 +1637,8 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
   }, [onOpen, targetPath]);
 
   const handleOpenInFilePreview = useCallback(() => {
-    if (threadRef && workspaceRelativePath) {
-      onOpenInPanel(workspaceRelativePath, line);
+    if (threadRef && panelPath) {
+      onOpenInPanel(panelPath, line);
       return;
     }
     if (onOpenMedia) {
@@ -1666,7 +1646,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
       return;
     }
     handleOpenInEditor();
-  }, [handleOpenInEditor, line, onOpenInPanel, onOpenMedia, threadRef, workspaceRelativePath]);
+  }, [handleOpenInEditor, line, onOpenInPanel, onOpenMedia, panelPath, threadRef]);
 
   const handleOpenInBrowser = useCallback(() => {
     if (!onOpenInBrowser) {
@@ -1867,7 +1847,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
 
   const canOpenInEditor = onOpen !== undefined;
   const canOpenInBrowser = onOpenInBrowser !== undefined;
-  const canOpenInPanel = threadRef !== undefined && Boolean(workspaceRelativePath);
+  const canOpenInPanel = threadRef !== undefined && Boolean(panelPath);
   const hasPrimaryAction = hasMarkdownFilePrimaryAction({
     canOpenInEditor,
     canOpenInBrowser,
@@ -1954,7 +1934,7 @@ function areMarkdownFileLinkPropsEqual(
     previous.targetPath === next.targetPath &&
     previous.iconPath === next.iconPath &&
     previous.displayPath === next.displayPath &&
-    previous.workspaceRelativePath === next.workspaceRelativePath &&
+    previous.panelPath === next.panelPath &&
     previous.line === next.line &&
     previous.label === next.label &&
     previous.copyMarkdown === next.copyMarkdown &&
@@ -2098,24 +2078,24 @@ function ChatMarkdown({
     for (const href of extractMarkdownLinkHrefs(renderCodexFileCitationsAsMarkdown(text))) {
       const normalizedHref = normalizeMarkdownLinkHrefKey(href);
       if (metaByHref.has(normalizedHref)) continue;
-      const meta = resolveMarkdownFileLinkMeta(normalizedHref, cwd);
+      const meta = resolveMarkdownFileLinkMeta(normalizedHref, cwd, imageBaseDir ?? cwd);
       if (meta) {
         metaByHref.set(normalizedHref, meta);
       }
     }
     return metaByHref;
-  }, [cwd, text]);
+  }, [cwd, imageBaseDir, text]);
   const inlineCodeFileLinkMetaByText = useMemo(() => {
     const metaByText = new Map<string, MarkdownFileLinkMeta>();
     for (const span of extractInlineCodeSpans(text)) {
       if (metaByText.has(span)) continue;
-      const meta = resolveInlineCodeFileLinkMeta(span, cwd);
+      const meta = resolveInlineCodeFileLinkMeta(span, cwd, imageBaseDir ?? cwd);
       if (meta) {
         metaByText.set(span, meta);
       }
     }
     return metaByText;
-  }, [cwd, text]);
+  }, [cwd, imageBaseDir, text]);
   const fileLinkParentSuffixByPath = useMemo(() => {
     const filePaths = [
       ...[...markdownFileLinkMetaByHref.values()].map((meta) => meta.filePath),
@@ -2124,6 +2104,7 @@ function ChatMarkdown({
     return buildFileLinkParentSuffixByPath(filePaths);
   }, [inlineCodeFileLinkMetaByText, markdownFileLinkMetaByHref]);
   const markdownUrlTransform = useCallback((href: string) => {
+    if (parseAssistantCitationHref(href)) return href;
     if (isWindowsDrivePathHref(href)) return href;
     return rewriteMarkdownFileUriHref(href) ?? defaultUrlTransform(href);
   }, []);
@@ -2223,12 +2204,13 @@ function ChatMarkdown({
       return openFileInPreview({
         threadRef,
         filePath: path,
+        workspaceRoot: cwd,
         httpBaseUrl: preparedConnection.value.httpBaseUrl,
         createAssetUrl,
         openPreview,
       });
     },
-    [createAssetUrl, openPreview, preparedConnection, threadRef],
+    [createAssetUrl, cwd, openPreview, preparedConnection, threadRef],
   );
   const findWorkspaceBasenameMatch = useCallback(
     async (workspaceRelativePath: string) => {
@@ -2251,23 +2233,23 @@ function ChatMarkdown({
     [cwd, environmentId, searchProjectEntries],
   );
   // A bare filename resolves to the workspace root, which is rarely where the
-  // file is, so ask the index before opening.
+  // file is, so ask the index before opening. Absolute host paths open as-is.
   const openFileInPanel = useCallback(
-    (workspaceRelativePath: string, line: number | undefined) => {
+    (panelPath: string, line: number | undefined) => {
       if (!threadRef) return;
       // Claimed on every open so a synchronous one supersedes a lookup already
       // in flight.
       const isLatestLookup = claimWorkspaceBasenameLookup();
       const openAt = (path: string) =>
         useRightPanelStore.getState().openFile(threadRef, path, line);
-      if (!cwd || !needsWorkspaceBasenameLookup(workspaceRelativePath)) {
-        openAt(workspaceRelativePath);
+      if (!cwd || !needsWorkspaceBasenameLookup(panelPath)) {
+        openAt(panelPath);
         return;
       }
       void (async () => {
-        const match = await findWorkspaceBasenameMatch(workspaceRelativePath);
+        const match = await findWorkspaceBasenameMatch(panelPath);
         if (!isLatestLookup()) return;
-        openAt(match ?? workspaceRelativePath);
+        openAt(match ?? panelPath);
       })();
     },
     [cwd, findWorkspaceBasenameMatch, threadRef],
@@ -2310,6 +2292,11 @@ function ChatMarkdown({
         mediaMimeTypeFromExtension(
           fileLinkMeta.basename.slice(fileLinkMeta.basename.lastIndexOf(".")),
         ) !== null;
+      // Media outside the workspace keeps the expanded preview; other host
+      // files (a report in a temp dir) open read-only in the files panel.
+      const panelPath =
+        fileLinkMeta.workspaceRelativePath ??
+        (!canPreviewMedia && isAbsolutePath(fileLinkMeta.filePath) ? fileLinkMeta.filePath : null);
 
       return (
         <MarkdownFileLink
@@ -2317,7 +2304,7 @@ function ChatMarkdown({
           targetPath={fileLinkMeta.targetPath}
           iconPath={fileLinkMeta.filePath}
           displayPath={fileLinkMeta.displayPath}
-          workspaceRelativePath={fileLinkMeta.workspaceRelativePath}
+          panelPath={panelPath}
           line={fileLinkMeta.line}
           label={labelParts.join(" · ")}
           copyMarkdown={copyMarkdown}
@@ -2431,10 +2418,12 @@ function ChatMarkdown({
         );
       },
       a({ node, href, children, title: _title, ...props }) {
+        const citation = href ? parseAssistantCitationHref(href) : null;
+        if (citation) return <AssistantCitationChip citation={citation} />;
         const normalizedHref = href ? normalizeMarkdownLinkHrefKey(href) : "";
         const fileLinkMeta = normalizedHref
           ? (markdownFileLinkMetaByHref.get(normalizedHref) ??
-            resolveMarkdownFileLinkMeta(normalizedHref, cwd))
+            resolveMarkdownFileLinkMeta(normalizedHref, cwd, imageBaseDir ?? cwd))
           : null;
         if (!fileLinkMeta) {
           const faviconHost = resolveExternalWebLinkHost(href);
@@ -2580,7 +2569,7 @@ function ChatMarkdown({
           const codeText = nodeToPlainText(children);
           const fileLinkMeta =
             inlineCodeFileLinkMetaByText.get(codeText.trim()) ??
-            resolveInlineCodeFileLinkMeta(codeText, cwd);
+            resolveInlineCodeFileLinkMeta(codeText, cwd, imageBaseDir ?? cwd);
           if (fileLinkMeta) {
             return fileLinkChip(
               fileLinkMeta,
@@ -2630,7 +2619,6 @@ function ChatMarkdown({
                 copyMarkdown={copyMarkdown}
                 originalUrl={originalUrl}
                 style={authoredSizeStyle}
-                onImageExpand={imageExpand}
                 actionsSource={actionsSource}
               />
             );

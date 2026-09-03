@@ -1,6 +1,7 @@
 import * as Schema from "effect/Schema";
 import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
+import { TrimmedNonEmptyString } from "./baseSchemas.ts";
 
 import { ExternalLauncherError, LaunchEditorInput } from "./editor.ts";
 import {
@@ -96,8 +97,11 @@ import {
   PullRequestOperationError,
   PullRequestReactionInput,
   PullRequestRef,
+  PullRequestSummary,
   PullRequestReviewerCandidateList,
   PullRequestReviewerRequestInput,
+  PullRequestLabelCandidateList,
+  PullRequestLabelChangeInput,
   PullRequestSubmitReviewInput,
   PullRequestThreadCommentsInput,
   PullRequestThreadCommentsResult,
@@ -166,6 +170,7 @@ import {
 } from "./previewAutomation.ts";
 import {
   ServerConfigStreamEvent,
+  DesktopUpdateCommitInput,
   ServerConfig,
   ServerProviderUpdateError,
   ServerProviderUpdateInput,
@@ -276,6 +281,7 @@ export const WS_METHODS = {
   serverUpdateProvider: "server.updateProvider",
   serverUpdateServer: "server.updateServer",
   serverUpdateServerWithProgress: "server.updateServerWithProgress",
+  serverCommitDesktopUpdate: "server.commitDesktopUpdate",
   serverUpsertKeybinding: "server.upsertKeybinding",
   serverRemoveKeybinding: "server.removeKeybinding",
   serverGetSettings: "server.getSettings",
@@ -299,6 +305,7 @@ export const WS_METHODS = {
   // Pull request methods
   pullRequestsList: "pullRequests.list",
   pullRequestsListStats: "pullRequests.listStats",
+  pullRequestsSummary: "pullRequests.summary",
   pullRequestsDetail: "pullRequests.detail",
   pullRequestsActivity: "pullRequests.activity",
   pullRequestsThreadComments: "pullRequests.threadComments",
@@ -314,6 +321,8 @@ export const WS_METHODS = {
   pullRequestsInvalidate: "pullRequests.invalidate",
   pullRequestsReviewerCandidates: "pullRequests.reviewerCandidates",
   pullRequestsRequestReviewers: "pullRequests.requestReviewers",
+  pullRequestsLabelCandidates: "pullRequests.labelCandidates",
+  pullRequestsSetLabels: "pullRequests.setLabels",
 
   // Source control methods
   sourceControlLookupRepository: "sourceControl.lookupRepository",
@@ -366,6 +375,7 @@ export const WsServerRefreshProvidersRpc = Rpc.make(WS_METHODS.serverRefreshProv
      * refreshes.
      */
     instanceId: Schema.optional(ProviderInstanceId),
+    cwd: Schema.optional(TrimmedNonEmptyString),
   }),
   success: ServerProviderUpdatedPayload,
   error: EnvironmentAuthorizationError,
@@ -392,6 +402,12 @@ export const WsServerUpdateServerWithProgressRpc = Rpc.make(
     stream: true,
   },
 );
+
+export const WsServerCommitDesktopUpdateRpc = Rpc.make(WS_METHODS.serverCommitDesktopUpdate, {
+  payload: DesktopUpdateCommitInput,
+  success: ServerSelfUpdateResult,
+  error: Schema.Union([ServerSelfUpdateError, EnvironmentAuthorizationError]),
+});
 
 export const WsServerGetSettingsRpc = Rpc.make(WS_METHODS.serverGetSettings, {
   payload: Schema.Struct({}),
@@ -511,6 +527,12 @@ export const WsPullRequestsListStatsRpc = Rpc.make(WS_METHODS.pullRequestsListSt
   error: PullRequestRpcError,
 });
 
+export const WsPullRequestsSummaryRpc = Rpc.make(WS_METHODS.pullRequestsSummary, {
+  payload: PullRequestRef,
+  success: PullRequestSummary,
+  error: PullRequestRpcError,
+});
+
 export const WsPullRequestsDetailRpc = Rpc.make(WS_METHODS.pullRequestsDetail, {
   payload: PullRequestRef,
   success: PullRequestDetail,
@@ -608,6 +630,19 @@ export const WsPullRequestsReviewerCandidatesRpc = Rpc.make(
 
 export const WsPullRequestsRequestReviewersRpc = Rpc.make(WS_METHODS.pullRequestsRequestReviewers, {
   payload: PullRequestReviewerRequestInput,
+  success: Schema.Void,
+  error: PullRequestRpcError,
+});
+
+/** Read when the label menu opens, for the same reason the reviewer candidates are. */
+export const WsPullRequestsLabelCandidatesRpc = Rpc.make(WS_METHODS.pullRequestsLabelCandidates, {
+  payload: PullRequestRef,
+  success: PullRequestLabelCandidateList,
+  error: PullRequestRpcError,
+});
+
+export const WsPullRequestsSetLabelsRpc = Rpc.make(WS_METHODS.pullRequestsSetLabels, {
+  payload: PullRequestLabelChangeInput,
   success: Schema.Void,
   error: PullRequestRpcError,
 });
@@ -1033,6 +1068,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerUpdateProviderRpc,
   WsServerUpdateServerRpc,
   WsServerUpdateServerWithProgressRpc,
+  WsServerCommitDesktopUpdateRpc,
   WsServerUpsertKeybindingRpc,
   WsServerRemoveKeybindingRpc,
   WsServerGetSettingsRpc,
@@ -1052,6 +1088,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsCloudInstallRelayClientRpc,
   WsPullRequestsListRpc,
   WsPullRequestsListStatsRpc,
+  WsPullRequestsSummaryRpc,
   WsPullRequestsDetailRpc,
   WsPullRequestsActivityRpc,
   WsPullRequestsThreadCommentsRpc,
@@ -1067,6 +1104,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsPullRequestsInvalidateRpc,
   WsPullRequestsReviewerCandidatesRpc,
   WsPullRequestsRequestReviewersRpc,
+  WsPullRequestsLabelCandidatesRpc,
+  WsPullRequestsSetLabelsRpc,
   WsSourceControlLookupRepositoryRpc,
   WsSourceControlCloneRepositoryRpc,
   WsSourceControlPublishRepositoryRpc,
