@@ -5,8 +5,9 @@ control them from the local web app, [iOS app](https://apps.apple.com/us/app/t3-
 [Android app](https://play.google.com/store/apps/details?id=com.t3tools.t3code), desktop app, or
 another computer.
 
-This fork adds first-class [Pi](https://pi.dev) support through the community `pi-acp` adapter,
-while keeping the rest of T3 Code's provider and remote-access workflow intact.
+Works with your subscriptions on Claude Code, Codex, Cursor, Grok Build, OpenCode, and Google Antigravity. If they're set up on your computer, T3 Code can control them.
+This fork also adds first-class [Pi](https://pi.dev) support through the community `pi-acp`
+adapter while keeping T3 Code's provider and remote-access workflow intact.
 
 ## What this fork adds
 
@@ -27,14 +28,15 @@ files, git state, and sessions; clients connect to that server.
 T3 Code drives provider CLIs; it does not ship them. Install and authenticate each provider on
 the machine running the T3 Code server.
 
-| Provider   | CLI                                                                  | Default binary | Authentication        |
-| ---------- | -------------------------------------------------------------------- | -------------- | --------------------- |
-| Codex      | [Codex CLI](https://developers.openai.com/codex/cli)                 | `codex`        | `codex login`         |
-| Claude     | [Claude Code](https://claude.com/product/claude-code)                | `claude`       | `claude auth login`   |
-| Cursor     | [Cursor CLI](https://cursor.com/cli)                                 | `cursor-agent` | `agent login`         |
-| Grok Build | [Grok Build CLI](https://x.ai/cli)                                   | `grok`         | `grok login`          |
-| OpenCode   | [OpenCode](https://opencode.ai)                                      | `opencode`     | `opencode auth login` |
-| Pi Agent   | [Pi](https://pi.dev) + [`pi-acp`](https://github.com/svkozak/pi-acp) | `pi-acp`       | Pi's provider setup   |
+| Provider    | CLI                                                                  | Default binary | Authentication        |
+| ----------- | -------------------------------------------------------------------- | -------------- | --------------------- |
+| Codex       | [Codex CLI](https://developers.openai.com/codex/cli)                 | `codex`        | `codex login`         |
+| Claude      | [Claude Code](https://claude.com/product/claude-code)                | `claude`       | `claude auth login`   |
+| Cursor      | [Cursor CLI](https://cursor.com/cli)                                 | `cursor-agent` | `agent login`         |
+| Grok Build  | [Grok Build CLI](https://x.ai/cli)                                   | `grok`         | `grok login`          |
+| OpenCode    | [OpenCode](https://opencode.ai)                                      | `opencode`     | `opencode auth login` |
+| Antigravity | Built-in managed runtime                                             | Automatic      | Google sign-in        |
+| Pi Agent    | [Pi](https://pi.dev) + [`pi-acp`](https://github.com/svkozak/pi-acp) | `pi-acp`       | Pi's provider setup   |
 
 Codex and Claude are enabled by default. Other providers can be enabled from **Settings**.
 
@@ -58,6 +60,16 @@ non-standard location, set the Pi provider's **Binary path** in **Settings** to 
 ## Installation
 
 ### Use the upstream release
+
+> [!WARNING]
+> T3 Code currently supports Codex, Claude, Cursor, Grok Build, OpenCode, and Antigravity. Install and authenticate at least one provider before use:
+>
+> - Codex: install [Codex CLI](https://developers.openai.com/codex/cli) and run `codex login`
+> - Claude: install [Claude Code](https://claude.com/product/claude-code) and run `claude auth login`
+> - Cursor: install [Cursor CLI](https://cursor.com/cli) and run `agent login`
+> - Grok Build: install [Grok Build CLI](https://x.ai/cli) and run `grok login`
+> - OpenCode: install [OpenCode](https://opencode.ai) and run `opencode auth login`
+> - Antigravity: enable it in Settings, then use **Install Antigravity** and **Sign in with Google**. No CLI is required.
 
 For the upstream provider set, install and run the released server:
 

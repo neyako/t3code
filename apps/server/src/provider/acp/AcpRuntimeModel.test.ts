@@ -372,6 +372,24 @@ describe("AcpRuntimeModel", () => {
     ]);
   });
 
+  it("keeps thought chunks separate from assistant text", () => {
+    const notification = {
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "agent_thought_chunk",
+        content: { type: "text", text: "Inspect the current implementation first." },
+      },
+    } satisfies EffectAcpSchema.SessionNotification;
+
+    expect(parseSessionUpdateEvent(notification).events).toEqual([
+      {
+        _tag: "ThoughtDelta",
+        text: "Inspect the current implementation first.",
+        rawPayload: notification,
+      },
+    ]);
+  });
+
   it("projects Pi usage updates into runtime events", () => {
     const result = parseSessionUpdateEvent({
       sessionId: "session-1",
@@ -438,6 +456,27 @@ describe("AcpRuntimeModel", () => {
     } satisfies EffectAcpSchema.SessionNotification);
 
     expect(result.events).toEqual([{ _tag: "ModeChanged", modeId: "code" }]);
+  });
+
+  it("preserves native command inputs and empty command lists", () => {
+    const availableCommands = [
+      { name: "plan", description: "Plan a task", input: { hint: "task" } },
+      { name: "logout", description: "Sign out" },
+    ] satisfies ReadonlyArray<EffectAcpSchema.AvailableCommand>;
+
+    for (const commands of [availableCommands, []]) {
+      const notification = {
+        sessionId: "session-1",
+        update: { sessionUpdate: "available_commands_update", availableCommands: commands },
+      } satisfies EffectAcpSchema.SessionNotification;
+      expect(parseSessionUpdateEvent(notification).events).toEqual([
+        {
+          _tag: "AvailableCommandsUpdated",
+          availableCommands: commands,
+          rawPayload: notification,
+        },
+      ]);
+    }
   });
 
   it("keeps permission request parsing compatible with loose extension payloads", () => {
