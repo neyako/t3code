@@ -1119,12 +1119,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const stopStaleSessionsForThread = Effect.fn("stopStaleSessionsForThread")(function* (input: {
     readonly threadId: ThreadId;
     readonly currentInstanceId: ProviderInstanceId;
+    readonly provider?: ProviderDriverKind;
   }) {
     const currentAdapters = yield* getAdapterEntries;
     yield* Effect.forEach(
       currentAdapters,
       ([instanceId, adapter]) =>
-        instanceId === input.currentInstanceId
+        instanceId === input.currentInstanceId ||
+        (input.provider !== undefined && adapter.provider !== input.provider)
           ? Effect.void
           : Effect.gen(function* () {
               const hasSession = yield* adapter.hasSession(input.threadId);
@@ -1257,6 +1259,13 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         }
         const adapter = yield* registry.getByInstance(resolvedInstanceId);
         yield* clearTurnAnalyticsSession(resolvedInstanceId, threadId);
+        // Codex cannot resume one thread in two app-server processes at once.
+        // Stop same-driver instances first; unrelated providers remain live if start fails.
+        yield* stopStaleSessionsForThread({
+          threadId,
+          currentInstanceId: resolvedInstanceId,
+          provider: resolvedProvider,
+        });
         yield* prepareMcpSession(threadId, resolvedInstanceId);
         const session = yield* adapter
           .startSession({

@@ -43,6 +43,10 @@ Choose the other account from the thread's model picker. T3 Code offers compatib
 Codex instances that share the thread's **CODEX_HOME path**. Changing accounts does
 not move the conversation into a separate Codex home.
 
+When Codex reports that an account has reached its usage limit, T3 Code marks the
+account as limited and disables its models until the reported reset time. Choose
+another configured account to continue the thread.
+
 If the account is missing from the picker, compare the home paths in provider
 settings. If two instances show the same unexpected account or models, check their
 reported accounts, refresh provider status, and confirm the second instance has
