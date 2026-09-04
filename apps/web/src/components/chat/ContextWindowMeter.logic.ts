@@ -1,8 +1,4 @@
-import {
-  ProviderDriverKind,
-  type ModelSelection,
-  type ProviderInstanceId,
-} from "@t3tools/contracts";
+import type { ModelSelection, ProviderDriverKind, ProviderInstanceId } from "@t3tools/contracts";
 import {
   CLAUDE_RESUME_COMPACTION_NEVER_ANSWER,
   isClaudeResumeCompactionQuestion,
@@ -16,40 +12,34 @@ import { getTriggerDisplayModelName, type ModelEsque } from "./providerIconUtils
 export const CLAUDE_RESUME_COMPACTION_MINUTES = 70;
 export const CLAUDE_RESUME_COMPACTION_TOKENS = 100_000;
 
+export function providerSupportsManualCompaction(
+  provider: ProviderInstanceEntry | null | undefined,
+): boolean {
+  return provider?.snapshot.slashCommands.some((command) => command.name === "compact") ?? false;
+}
+
 export function hasAvailableCompactionProvider(input: {
   readonly providers: ReadonlyArray<ProviderInstanceEntry>;
   readonly driverKind: ProviderDriverKind;
   readonly instanceId: ProviderInstanceId | null;
   readonly lockedInstanceId: ProviderInstanceId | null;
 }): boolean {
-  const compatibleDriverProviders = input.providers.filter(
+  const driverProviders = input.providers.filter(
     (provider) => provider.driverKind === input.driverKind,
   );
   const lockedContinuationGroupKey = input.lockedInstanceId
-    ? compatibleDriverProviders.find((provider) => provider.instanceId === input.lockedInstanceId)
+    ? driverProviders.find((provider) => provider.instanceId === input.lockedInstanceId)
         ?.continuationGroupKey
     : undefined;
   const compatibleProviders = lockedContinuationGroupKey
-    ? compatibleDriverProviders.filter(
+    ? driverProviders.filter(
         (provider) => provider.continuationGroupKey === lockedContinuationGroupKey,
       )
-    : compatibleDriverProviders;
+    : driverProviders;
 
-  return (
-    resolveSelectableProviderInstanceEntry(compatibleProviders, input.instanceId ?? undefined) !==
-    undefined
+  return providerSupportsManualCompaction(
+    resolveSelectableProviderInstanceEntry(compatibleProviders, input.instanceId ?? undefined),
   );
-}
-
-export function hasAvailableClaudeCompactionProvider(input: {
-  readonly providers: ReadonlyArray<ProviderInstanceEntry>;
-  readonly instanceId: ProviderInstanceId | null;
-  readonly lockedInstanceId: ProviderInstanceId | null;
-}): boolean {
-  return hasAvailableCompactionProvider({
-    ...input,
-    driverKind: ProviderDriverKind.make("claudeAgent"),
-  });
 }
 
 export function hasDismissedResumeCompaction(
