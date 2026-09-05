@@ -10,7 +10,6 @@ import {
   type OrchestrationThreadShell,
   type PullRequestSummary,
   type ServerSettings,
-  type ServerSettingsPatch,
 } from "@t3tools/contracts";
 import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
 import { assert, describe, it } from "@effect/vitest";
@@ -163,9 +162,12 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
   const summaryRecovery = yield* Ref.make<ReadonlyArray<boolean | undefined>>([]);
   const invalidatedCwds = yield* Ref.make<ReadonlyArray<string>>([]);
 
-  const updateSettings = (patch: ServerSettingsPatch) =>
+  const updateSettings: ServerSettingsService["Service"]["updateSettings"] = (patch) =>
     Effect.gen(function* () {
-      const next = applyServerSettingsPatch(yield* Ref.get(settings), patch);
+      const current = yield* Ref.get(settings);
+      const resolvedPatch = typeof patch === "function" ? patch(current) : patch;
+      if (resolvedPatch === undefined) return current;
+      const next = applyServerSettingsPatch(current, resolvedPatch);
       yield* Ref.set(settings, next);
       yield* PubSub.publish(settingsChanges, next);
       return next;
