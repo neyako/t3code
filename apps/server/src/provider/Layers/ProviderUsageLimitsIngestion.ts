@@ -14,6 +14,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 
+import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.ts";
 import { ProviderService } from "../Services/ProviderService.ts";
 
@@ -21,12 +22,15 @@ export const ProviderUsageLimitsIngestionLive = Layer.effectDiscard(
   Effect.gen(function* () {
     const providerService = yield* ProviderService;
     const instanceRegistry = yield* ProviderInstanceRegistry;
+    const serverSettings = yield* ServerSettingsService;
 
     yield* providerService.streamEvents.pipe(
       Stream.filter(
         (event) =>
           event.type === "account.rate-limits.updated" ||
-          (event.type === "runtime.error" && event.payload.class === "rate_limit"),
+          (event.provider === "codex" &&
+            event.type === "runtime.error" &&
+            event.payload.class === "rate_limit"),
       ),
       Stream.runForEach((event) =>
         Effect.gen(function* () {
@@ -41,7 +45,25 @@ export const ProviderUsageLimitsIngestionLive = Layer.effectDiscard(
           if (event.type === "account.rate-limits.updated") {
             yield* instance.snapshot.applyUsageLimits({ ...event.payload.limits, checkedAt });
           } else {
-            yield* instance.snapshot.refresh;
+            // Use the existing settings switch so installed clients and server
+            // routing agree. Re-enabling stays an explicit user action.
+            const instanceId = event.providerInstanceId;
+            yield* serverSettings.updateSettings((settings) => {
+              const config = settings.providerInstances[instanceId];
+              if (config) {
+                if (config.driver !== "codex" || config.enabled === false) return;
+                return {
+                  providerInstances: {
+                    ...settings.providerInstances,
+                    [instanceId]: { ...config, enabled: false },
+                  },
+                };
+              }
+              // Default instances may still use the legacy settings slot.
+              if (instanceId === "codex" && settings.providers.codex.enabled) {
+                return { providers: { codex: { enabled: false } } };
+              }
+            });
           }
           // One bad event must not end the subscriber for every later one.
         }).pipe(Effect.ignoreCause({ log: true })),

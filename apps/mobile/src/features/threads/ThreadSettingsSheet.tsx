@@ -106,13 +106,7 @@ function ModelRow(props: {
 }) {
   return (
     <Pressable
-      accessibilityLabel={[
-        props.option.label,
-        props.option.subtitle,
-        props.option.unavailableReason,
-      ]
-        .filter(Boolean)
-        .join(", ")}
+      accessibilityLabel={[props.option.label, props.option.subtitle].filter(Boolean).join(", ")}
       accessibilityRole="radio"
       accessibilityState={{
         checked: props.selected,
@@ -144,18 +138,13 @@ function ModelRow(props: {
               <Text className="text-3xs font-t3-bold text-foreground-muted">Legacy</Text>
             </View>
           ) : null}
-          {props.option.isUnavailable && !props.option.unavailableReason ? (
+          {props.option.isUnavailable ? (
             <Text className="text-xs text-foreground">Unavailable</Text>
           ) : null}
         </View>
         {props.option.subtitle ? (
           <Text className="text-xs text-foreground-muted" numberOfLines={1}>
             {props.option.subtitle}
-          </Text>
-        ) : null}
-        {props.option.unavailableReason ? (
-          <Text className="text-xs text-warning-foreground" numberOfLines={2}>
-            {props.option.unavailableReason}
           </Text>
         ) : null}
       </View>

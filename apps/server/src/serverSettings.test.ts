@@ -25,6 +25,7 @@ import * as ServerSettingsModule from "./serverSettings.ts";
 
 const decodeSettingsPatch = Schema.decodeUnknownEffect(ServerSettingsPatch);
 const decodeServerSettings = Schema.decodeUnknownEffect(ServerSettings);
+const decodeServerSettingsJson = Schema.decodeUnknownEffect(Schema.fromJsonString(ServerSettings));
 
 const makeServerSettingsLayer = () =>
   ServerSettingsModule.layer.pipe(
@@ -73,6 +74,52 @@ const recordProviderUsage = (provider: string, instanceId: string | null = provi
   });
 
 it.layer(NodeServices.layer)("server settings", (it) => {
+  it.effect(
+    "serializes server-side settings updates and persists the existing provider switch",
+    () =>
+      Effect.gen(function* () {
+        const settings = yield* ServerSettingsModule.ServerSettingsService;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const config = yield* ServerConfig.ServerConfig;
+        const first = ProviderInstanceId.make("codex_work");
+        const second = ProviderInstanceId.make("codex_personal");
+        yield* settings.updateSettings({
+          providerInstances: {
+            [first]: {
+              driver: ProviderDriverKind.make("codex"),
+              enabled: true,
+              config: { homePath: "/work" },
+            },
+            [second]: {
+              driver: ProviderDriverKind.make("codex"),
+              enabled: true,
+              config: { homePath: "/personal" },
+            },
+          },
+        });
+        yield* Effect.all(
+          [first, second].map((id) =>
+            settings.updateSettings((current) => ({
+              providerInstances: {
+                ...current.providerInstances,
+                [id]: { ...current.providerInstances[id]!, enabled: false },
+              },
+            })),
+          ),
+          { concurrency: "unbounded" },
+        );
+        const persisted = yield* decodeServerSettingsJson(
+          yield* fileSystem.readFileString(config.settingsPath),
+        );
+        assert.isFalse(persisted.providerInstances[first]?.enabled);
+        assert.isFalse(persisted.providerInstances[second]?.enabled);
+        assert.deepEqual(persisted.providerInstances[first]?.config, { homePath: "/work" });
+        const before = yield* fileSystem.readFileString(config.settingsPath);
+        yield* settings.updateSettings(() => undefined);
+        assert.equal(yield* fileSystem.readFileString(config.settingsPath), before);
+      }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
   it.effect("preserves context when reading a provider environment secret fails", () => {
     const platformCause = PlatformError.systemError({
       _tag: "PermissionDenied",

@@ -196,9 +196,12 @@ export class ServerSettingsService extends Context.Service<
     /** Read the current settings. */
     readonly getSettings: Effect.Effect<ServerSettings, ServerSettingsError>;
 
-    /** Patch settings and persist. Returns the new full settings object. */
+    /**
+     * Patch settings and persist. A server-side updater runs under the write
+     * lock against current settings; returning undefined leaves them unchanged.
+     */
     readonly updateSettings: (
-      patch: ServerSettingsPatch,
+      patch: ServerSettingsPatch | ((current: ServerSettings) => ServerSettingsPatch | undefined),
     ) => Effect.Effect<ServerSettings, ServerSettingsError>;
 
     /** Stream of settings change events. */
@@ -220,6 +223,7 @@ const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
   Effect.gen(function* () {
     const { automaticGitFetchInterval, providerHealthRefreshInterval, ...overridesForMerge } =
       overrides;
+    const writeSemaphore = yield* Semaphore.make(1);
     const merged = deepMerge(DEFAULT_SERVER_SETTINGS, overridesForMerge);
     const initialSettings = yield* normalizeServerSettings({
       ...merged,
@@ -237,11 +241,17 @@ const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
       ready: Effect.void,
       getSettings: Ref.get(currentSettingsRef).pipe(Effect.map(resolveTextGenerationProvider)),
       updateSettings: (patch) =>
-        Ref.get(currentSettingsRef).pipe(
-          Effect.map((currentSettings) => applyServerSettingsPatch(currentSettings, patch)),
-          Effect.flatMap(normalizeServerSettings),
-          Effect.tap((nextSettings) => Ref.set(currentSettingsRef, nextSettings)),
-          Effect.map(resolveTextGenerationProvider),
+        writeSemaphore.withPermits(1)(
+          Effect.gen(function* () {
+            const current = yield* Ref.get(currentSettingsRef);
+            const resolvedPatch = typeof patch === "function" ? patch(current) : patch;
+            if (resolvedPatch === undefined) return resolveTextGenerationProvider(current);
+            const next = yield* normalizeServerSettings(
+              applyServerSettingsPatch(current, resolvedPatch),
+            );
+            yield* Ref.set(currentSettingsRef, next);
+            return resolveTextGenerationProvider(next);
+          }),
         ),
       streamChanges: Stream.empty,
       subscribeChanges: Effect.succeed(Stream.empty),
@@ -823,9 +833,15 @@ const make = Effect.gen(function* () {
       writeSemaphore.withPermits(1)(
         Effect.gen(function* () {
           const current = yield* getSettingsFromCache;
+          const resolvedPatch = typeof patch === "function" ? patch(current) : patch;
+          if (resolvedPatch === undefined) {
+            return resolveTextGenerationProvider(
+              yield* materializeProviderEnvironmentSecrets(current),
+            );
+          }
           const nextPersisted = yield* persistProviderEnvironmentSecrets(
             current,
-            applyServerSettingsPatch(current, patch),
+            applyServerSettingsPatch(current, resolvedPatch),
           );
           const next = yield* normalizeServerSettings(nextPersisted);
           yield* writeSettingsAtomically(next);
