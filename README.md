@@ -178,10 +178,11 @@ See [Remote access](./docs/user/remote-access.md) for pairing, Tailscale, SSH, a
 - [Permission modes](./docs/user/permission-modes.md)
 - [Keyboard shortcuts](./docs/user/keybindings.md)
 - [Project settings](./docs/user/project-settings.md)
+- [Remote access from a phone or another machine](./docs/user/remote-access.md)
 - [Keeping app and server in sync](./docs/user/updating.md)
 - [Source control integrations](./docs/user/source-control.md)
-- [Running T3 Code in the background](./docs/user/background-service.md)
-- [Building from source](./docs/internals/overview.md)
+- Multiple accounts: [Codex](./docs/user/providers-codex.md) · [Claude](./docs/user/providers-claude.md)
+- [Run T3 Code as a background service](./docs/user/background-service.md)
 
 ## Contributing
 
