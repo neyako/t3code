@@ -43,6 +43,11 @@ Choose the other account from the thread's model picker. T3 Code offers compatib
 Codex instances that share the thread's **CODEX_HOME path**. Changing accounts does
 not move the conversation into a separate Codex home.
 
+Selecting another compatible account stops the current session. Your next message
+resumes the saved conversation on that account, including after a server restart.
+If the saved conversation cannot be restored, T3 Code reports an error. Restore
+the original Codex session files or start a new thread to begin a new conversation.
+
 When Codex reports that an account has reached its usage limit, T3 Code switches
 that instance off in **Settings > Providers**. Choose another configured account
 to continue the thread. When Codex reports reset times for all exhausted quota

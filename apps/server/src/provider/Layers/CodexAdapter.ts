@@ -2206,6 +2206,14 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           });
         }
 
+        if (input.resumeCursor !== undefined && !isCodexResumeCursorSchema(input.resumeCursor)) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "startSession",
+            issue: "The saved Codex session is invalid. Start a new thread.",
+          });
+        }
+
         const existing = sessions.get(input.threadId);
         if (existing && !existing.stopped) {
           yield* Effect.suspend(() => stopSessionInternal(existing));
@@ -2224,9 +2232,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           launchArgs: resolveCodexLaunchArgs(codexConfig.launchArgs, options?.environment),
           ...(options?.environment ? { environment: options.environment } : {}),
           ...(codexConfig.homePath ? { homePath: codexConfig.homePath } : {}),
-          ...(isCodexResumeCursorSchema(input.resumeCursor)
-            ? { resumeCursor: input.resumeCursor }
-            : {}),
+          ...(input.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
           runtimeMode: input.runtimeMode,
           ...(input.modelSelection?.instanceId === boundInstanceId
             ? { model: input.modelSelection.model }

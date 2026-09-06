@@ -2756,6 +2756,62 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.providerInstanceId).toBe(ProviderInstanceId.make("codex_work"));
   });
 
+  effectIt.effect("stops the old account as soon as selection changes, before another turn", () =>
+    Effect.gen(function* () {
+      const stopped = yield* Deferred.make<void>();
+      const harness = yield* Effect.promise(() =>
+        createHarness({
+          stopSessionEffect: () => Deferred.succeed(stopped, undefined).pipe(Effect.asVoid),
+        }),
+      );
+      const threadId = ThreadId.make("thread-1");
+      const now = "2026-01-01T00:00:00.000Z";
+      harness.runtimeSessions.push({
+        threadId,
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        status: "ready",
+        runtimeMode: "approval-required",
+        resumeCursor: { threadId: "native-original" },
+        createdAt: now,
+        updatedAt: now,
+      });
+      yield* harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-seed-account-session"),
+        threadId,
+        session: {
+          threadId,
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          status: "ready",
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      });
+      yield* harness.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("cmd-select-other-account"),
+        threadId,
+        modelSelection: { instanceId: ProviderInstanceId.make("codex_work"), model: "gpt-5-codex" },
+      });
+      yield* Deferred.await(stopped);
+      yield* Effect.promise(() => harness.drain());
+      expect(harness.stopSession).toHaveBeenCalledExactlyOnceWith({ threadId });
+      expect(harness.startSession).not.toHaveBeenCalled();
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      expect(harness.runtimeSessions).toEqual([]);
+      const thread = (yield* Effect.promise(() => harness.readModel())).threads.find(
+        (entry) => entry.id === threadId,
+      );
+      expect(thread?.modelSelection.instanceId).toBe(ProviderInstanceId.make("codex_work"));
+      expect(thread?.session?.status).toBe("stopped");
+    }),
+  );
+
   it("restarts the provider session when the thread workspace changes", async () => {
     const harness = await createHarness({
       threadModelSelection: {

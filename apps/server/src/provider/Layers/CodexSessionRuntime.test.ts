@@ -4,7 +4,7 @@ import { it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { describe } from "vite-plus/test";
-import { DEFAULT_MODEL, ThreadId } from "@t3tools/contracts";
+import { DEFAULT_MODEL } from "@t3tools/contracts";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as CodexRpc from "effect-codex-app-server/rpc";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
@@ -19,7 +19,6 @@ import {
   buildTurnStartParams,
   describeMcpElicitation,
   hasConfiguredMcpServer,
-  isRecoverableThreadResumeError,
   makeMemoryConsolidationNotificationFilter,
   openCodexThread,
   toMcpElicitationResponse,
@@ -728,70 +727,10 @@ describe("codexSessionAppServerArgs", () => {
   });
 });
 
-describe("isRecoverableThreadResumeError", () => {
-  it("matches missing thread errors", () => {
-    NodeAssert.equal(
-      isRecoverableThreadResumeError(
-        new CodexErrors.CodexAppServerRequestError({
-          code: -32603,
-          errorMessage: "Thread does not exist",
-        }),
-      ),
-      true,
-    );
-  });
-
-  it("matches a missing rollout for a known thread id", () => {
-    NodeAssert.equal(
-      isRecoverableThreadResumeError(
-        new CodexErrors.CodexAppServerRequestError({
-          code: -32603,
-          errorMessage: "no rollout found for thread id 019fdf74-aaa9-7950-b252-7cc7a8650470",
-        }),
-      ),
-      true,
-    );
-  });
-
-  it("ignores non-recoverable resume errors", () => {
-    NodeAssert.equal(
-      isRecoverableThreadResumeError(
-        new CodexErrors.CodexAppServerRequestError({
-          code: -32603,
-          errorMessage: "Permission denied",
-        }),
-      ),
-      false,
-    );
-  });
-
-  it("ignores unrelated missing-resource errors that do not mention threads", () => {
-    NodeAssert.equal(
-      isRecoverableThreadResumeError(
-        new CodexErrors.CodexAppServerRequestError({
-          code: -32603,
-          errorMessage: "Config file not found",
-        }),
-      ),
-      false,
-    );
-    NodeAssert.equal(
-      isRecoverableThreadResumeError(
-        new CodexErrors.CodexAppServerRequestError({
-          code: -32603,
-          errorMessage: "Model does not exist",
-        }),
-      ),
-      false,
-    );
-  });
-});
-
 describe("openCodexThread", () => {
-  it.effect("falls back to thread/start when resume fails recoverably", () =>
+  it.effect("propagates missing-thread resume failures without starting a new thread", () =>
     Effect.gen(function* () {
       const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
-      const started = makeThreadOpenResponse("fresh-thread");
       const client = {
         request: <M extends "thread/start" | "thread/resume">(
           method: M,
@@ -806,25 +745,85 @@ describe("openCodexThread", () => {
               }),
             );
           }
-          return Effect.succeed(started as CodexRpc.ClientRequestResponsesByMethod[M]);
+          return Effect.succeed(
+            makeThreadOpenResponse("fresh-thread") as CodexRpc.ClientRequestResponsesByMethod[M],
+          );
         },
       };
 
-      const opened = yield* openCodexThread({
+      const error = yield* openCodexThread({
         client,
-        threadId: ThreadId.make("thread-1"),
         runtimeMode: "full-access",
         cwd: "/tmp/project",
         requestedModel: "gpt-5.3-codex",
         serviceTier: undefined,
         resumeThreadId: "stale-thread",
+      }).pipe(Effect.flip);
+
+      NodeAssert.ok(isCodexAppServerRequestError(error));
+      NodeAssert.equal(error.errorMessage, "thread not found");
+      NodeAssert.deepStrictEqual(
+        calls.map((call) => call.method),
+        ["thread/resume"],
+      );
+    }),
+  );
+
+  it.effect("starts a new thread when no resume cursor exists", () =>
+    Effect.gen(function* () {
+      const calls: Array<"thread/start" | "thread/resume"> = [];
+      const client = {
+        request: <M extends "thread/start" | "thread/resume">(
+          method: M,
+          _payload: CodexRpc.ClientRequestParamsByMethod[M],
+        ) => {
+          calls.push(method);
+          return Effect.succeed(
+            makeThreadOpenResponse("fresh-thread") as CodexRpc.ClientRequestResponsesByMethod[M],
+          );
+        },
+      };
+
+      const opened = yield* openCodexThread({
+        client,
+        runtimeMode: "full-access",
+        cwd: "/tmp/project",
+        requestedModel: "gpt-5.3-codex",
+        serviceTier: undefined,
+        resumeThreadId: undefined,
       });
 
       NodeAssert.equal(opened.thread.id, "fresh-thread");
-      NodeAssert.deepStrictEqual(
-        calls.map((call) => call.method),
-        ["thread/resume", "thread/start"],
-      );
+      NodeAssert.deepStrictEqual(calls, ["thread/start"]);
+    }),
+  );
+
+  it.effect("resumes an existing thread without starting a new one", () =>
+    Effect.gen(function* () {
+      const calls: Array<"thread/start" | "thread/resume"> = [];
+      const client = {
+        request: <M extends "thread/start" | "thread/resume">(
+          method: M,
+          _payload: CodexRpc.ClientRequestParamsByMethod[M],
+        ) => {
+          calls.push(method);
+          return Effect.succeed(
+            makeThreadOpenResponse("existing-thread") as CodexRpc.ClientRequestResponsesByMethod[M],
+          );
+        },
+      };
+
+      const opened = yield* openCodexThread({
+        client,
+        runtimeMode: "full-access",
+        cwd: "/tmp/project",
+        requestedModel: "gpt-5.3-codex",
+        serviceTier: undefined,
+        resumeThreadId: "existing-thread",
+      });
+
+      NodeAssert.equal(opened.thread.id, "existing-thread");
+      NodeAssert.deepStrictEqual(calls, ["thread/resume"]);
     }),
   );
 
@@ -851,7 +850,6 @@ describe("openCodexThread", () => {
 
       const error = yield* openCodexThread({
         client,
-        threadId: ThreadId.make("thread-1"),
         runtimeMode: "full-access",
         cwd: "/tmp/project",
         requestedModel: "gpt-5.3-codex",

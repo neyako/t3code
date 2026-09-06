@@ -1627,15 +1627,16 @@ const make = Effect.gen(function* () {
     },
   );
 
-  const processSessionStopRequested = Effect.fn("processSessionStopRequested")(function* (
-    event: Extract<ProviderIntentEvent, { type: "thread.session-stop-requested" }>,
-  ) {
-    const thread = yield* resolveThreadShell(event.payload.threadId);
+  const processSessionStopRequested = Effect.fn("processSessionStopRequested")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly createdAt: string;
+  }) {
+    const thread = yield* resolveThreadShell(input.threadId);
     if (!thread) {
       return;
     }
 
-    const now = event.payload.createdAt;
+    const now = input.createdAt;
     const wasCompacting = compactingThreadIds.has(thread.id);
     stoppingThreadIds.add(thread.id);
     const clearStopping = Effect.sync(() => void stoppingThreadIds.delete(thread.id));
@@ -1703,9 +1704,37 @@ const make = Effect.gen(function* () {
       eventType: event.type,
     });
     switch (event.type) {
-      case "thread.meta-updated":
+      case "thread.meta-updated": {
+        if (event.payload.modelSelection !== undefined) {
+          const thread = yield* resolveThreadShell(event.payload.threadId);
+          const active = (yield* providerService.listSessions()).find(
+            (session) => session.threadId === event.payload.threadId,
+          );
+          if (
+            thread &&
+            active?.providerInstanceId &&
+            active.providerInstanceId !== thread.modelSelection.instanceId
+          ) {
+            const previous = yield* providerService.getInstanceInfo(active.providerInstanceId);
+            const next = yield* providerService.getInstanceInfo(thread.modelSelection.instanceId);
+            if (
+              next.enabled &&
+              previous.driverKind === next.driverKind &&
+              previous.continuationIdentity.continuationKey ===
+                next.continuationIdentity.continuationKey
+            ) {
+              // Stop in this worker before a queued turn can start on the new account.
+              yield* processSessionStopRequested({
+                threadId: thread.id,
+                createdAt: event.occurredAt,
+              });
+              threadModelSelections.delete(thread.id);
+            }
+          }
+        }
         yield* threadTitleRegenerationWorker.enqueue(event);
         return;
+      }
       case "thread.runtime-mode-set": {
         const thread = yield* resolveThreadShell(event.payload.threadId);
         if (!thread?.session || thread.session.status === "stopped") {
@@ -1732,7 +1761,7 @@ const make = Effect.gen(function* () {
         yield* processUserInputResponseRequested(event);
         return;
       case "thread.session-stop-requested":
-        yield* processSessionStopRequested(event);
+        yield* processSessionStopRequested(event.payload);
         return;
       case "thread.settled": {
         const thread = yield* projectionSnapshotQuery.getThreadShellById(event.payload.threadId);
@@ -1784,7 +1813,8 @@ const make = Effect.gen(function* () {
     );
     const processEvent = Effect.fn("processEvent")(function* (event: OrchestrationEvent) {
       if (
-        (event.type === "thread.meta-updated" && event.payload.regenerateTitle === true) ||
+        (event.type === "thread.meta-updated" &&
+          (event.payload.regenerateTitle === true || event.payload.modelSelection !== undefined)) ||
         event.type === "thread.runtime-mode-set" ||
         event.type === "thread.turn-start-requested" ||
         event.type === "thread.turn-interrupt-requested" ||

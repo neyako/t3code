@@ -318,6 +318,44 @@ const sessionErrorLayer = it.layer(
 );
 
 sessionErrorLayer("CodexAdapterLive session errors", (it) => {
+  it.effect("rejects an invalid resume cursor without stopping the active session", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("thread-invalid-resume");
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = sessionRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      runtime.closeImpl.mockClear();
+      const runtimeCount = sessionRuntimeFactory.factory.mock.calls.length;
+
+      const result = yield* adapter
+        .startSession({
+          provider: ProviderDriverKind.make("codex"),
+          threadId,
+          runtimeMode: "full-access",
+          resumeCursor: { threadId: 123 },
+        })
+        .pipe(Effect.result);
+
+      NodeAssert.equal(result._tag, "Failure");
+      NodeAssert.deepStrictEqual(
+        result.failure,
+        new ProviderAdapterValidationError({
+          provider: ProviderDriverKind.make("codex"),
+          operation: "startSession",
+          issue: "The saved Codex session is invalid. Start a new thread.",
+        }),
+      );
+      NodeAssert.equal(runtime.closeImpl.mock.calls.length, 0);
+      NodeAssert.equal(sessionRuntimeFactory.factory.mock.calls.length, runtimeCount);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
   it.effect("maps missing adapter sessions to ProviderAdapterSessionNotFoundError", () =>
     Effect.gen(function* () {
       const adapter = yield* CodexAdapter;
