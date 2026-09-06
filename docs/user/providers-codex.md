@@ -45,8 +45,11 @@ not move the conversation into a separate Codex home.
 
 When Codex reports that an account has reached its usage limit, T3 Code switches
 that instance off in **Settings > Providers**. Choose another configured account
-to continue the thread. After the limit resets, turn the instance back on using
-the same switch. It stays off across server restarts until you re-enable it.
+to continue the thread. When Codex reports reset times for all exhausted quota
+windows, T3 Code turns the instance back on within one minute of the last reset,
+including after a server restart. Without a reported reset time, turn it back on
+using the same switch. Manually disabled instances stay off; changing an account's
+settings cancels its scheduled recovery.
 
 If the account is missing from the picker, compare the home paths in provider
 settings. If two instances show the same unexpected account or models, check their

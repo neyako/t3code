@@ -11,6 +11,7 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 
 import { layerTest, ServerSettingsService } from "../../serverSettings.ts";
 import type { ProviderInstance } from "../ProviderDriver.ts";
@@ -46,11 +47,13 @@ const settingsLayer = () =>
 const ingest = Effect.fn("test.ingestUsageLimits")(function* (
   events: ReadonlyArray<ProviderRuntimeEvent>,
   applyUsageLimits: (update: ProviderUsageLimitsUpdate) => Effect.Effect<void> = () => Effect.void,
+  windows: ProviderUsageLimitsUpdate["windows"] = [],
 ) {
   const drained = yield* Deferred.make<void>();
   const instance = {
     snapshot: {
       applyUsageLimits,
+      getSnapshot: Effect.succeed({ usageLimits: { windows } }),
       refresh: Effect.die("Quota probing must not delay disabling an exhausted account"),
     },
   } as unknown as ProviderInstance;
@@ -73,6 +76,111 @@ const ingest = Effect.fn("test.ingestUsageLimits")(function* (
   );
   yield* Deferred.await(drained);
 });
+
+const exhaustedWindows = [
+  {
+    id: "primary",
+    kind: "session",
+    label: "Session",
+    usedPercent: 100,
+    resetsAt: "1970-01-01T00:01:00.000Z",
+  },
+  {
+    id: "secondary",
+    kind: "weekly",
+    label: "Weekly",
+    usedPercent: 100,
+    resetsAt: "1970-01-01T00:02:00.000Z",
+  },
+] as const satisfies ProviderUsageLimitsUpdate["windows"];
+
+it.effect("re-enables only the exhausted account after all exhausted windows reset", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const settings = yield* ServerSettingsService;
+      yield* ingest([limited, limited], undefined, exhaustedWindows);
+      assert.equal(
+        (yield* settings.getSettings).providerAutoEnableAt[workId],
+        exhaustedWindows[1].resetsAt,
+      );
+      yield* TestClock.adjust("1 minute");
+      assert.isFalse((yield* settings.getSettings).providerInstances[workId]?.enabled);
+      yield* TestClock.adjust("1 minute");
+      const after = yield* settings.getSettings;
+      assert.isTrue(after.providerInstances[workId]?.enabled);
+      assert.isTrue(after.providerInstances[personalId]?.enabled);
+      assert.deepEqual(after.providerAutoEnableAt, {});
+    }),
+  ).pipe(Effect.provide(settingsLayer())),
+);
+
+it.effect("recovers persisted instance and legacy deadlines at startup without quota probing", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const settings = yield* ServerSettingsService;
+      const before = yield* settings.getSettings;
+      yield* settings.updateSettings({
+        providers: { codex: { enabled: false } },
+        providerInstances: {
+          ...before.providerInstances,
+          [workId]: { ...before.providerInstances[workId]!, enabled: false },
+          [personalId]: { ...before.providerInstances[personalId]!, enabled: false },
+        },
+        providerAutoEnableAt: {
+          [workId]: "1970-01-01T00:00:00.000Z",
+          [ProviderInstanceId.make("codex")]: "1970-01-01T00:00:00.000Z",
+        },
+      });
+      yield* ingest([]);
+      const after = yield* settings.getSettings;
+      assert.isTrue(after.providerInstances[workId]?.enabled);
+      assert.isTrue(after.providers.codex.enabled);
+      assert.isFalse(after.providerInstances[personalId]?.enabled);
+      assert.deepEqual(after.providerAutoEnableAt, {});
+    }),
+  ).pipe(Effect.provide(settingsLayer())),
+);
+
+it.effect("manual enable then disable cancels recovery", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const settings = yield* ServerSettingsService;
+      yield* ingest([limited], undefined, exhaustedWindows);
+      for (const enabled of [true, false]) {
+        const current = yield* settings.getSettings;
+        yield* settings.updateSettings({
+          providerInstances: {
+            ...current.providerInstances,
+            [workId]: { ...current.providerInstances[workId]!, enabled },
+          },
+        });
+      }
+      yield* TestClock.adjust("2 minutes");
+      const after = yield* settings.getSettings;
+      assert.isFalse(after.providerInstances[workId]?.enabled);
+      assert.deepEqual(after.providerAutoEnableAt, {});
+    }),
+  ).pipe(Effect.provide(settingsLayer())),
+);
+
+it.effect("does not guess a reset when an exhausted window has missing or stale timing", () =>
+  Effect.gen(function* () {
+    for (const resetsAt of [undefined, "1970-01-01T00:00:00.000Z"]) {
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const settings = yield* ServerSettingsService;
+          yield* ingest([limited], undefined, [
+            exhaustedWindows[0],
+            { ...exhaustedWindows[1], resetsAt },
+          ]);
+          const after = yield* settings.getSettings;
+          assert.isFalse(after.providerInstances[workId]?.enabled);
+          assert.deepEqual(after.providerAutoEnableAt, {});
+        }),
+      ).pipe(Effect.provide(settingsLayer()));
+    }
+  }),
+);
 
 it.effect(
   "disables only the exhausted account through settings; the existing switch restores it",

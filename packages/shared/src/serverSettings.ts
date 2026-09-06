@@ -191,6 +191,7 @@ export function applyServerSettingsPatch(
   const next = deepMerge(current, patchForMerge);
   const nextWithReplacementsBase = {
     ...next,
+    providerAutoEnableAt: patch.providerAutoEnableAt ?? current.providerAutoEnableAt,
     ...(backgroundActivity !== undefined
       ? {
           backgroundActivity: {
