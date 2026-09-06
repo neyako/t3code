@@ -77,48 +77,6 @@ const recordProviderUsage = (provider: string, instanceId: string | null = provi
 
 it.layer(NodeServices.layer)("server settings", (it) => {
   it.effect(
-    "cancels recovery for edited or removed accounts but preserves redacted credentials",
-    () =>
-      Effect.gen(function* () {
-        const settings = yield* ServerSettingsModule.ServerSettingsService;
-        const id = ProviderInstanceId.make("codex_work");
-        const instance = {
-          driver: ProviderDriverKind.make("codex"),
-          enabled: false,
-          config: { homePath: "/work" },
-          environment: [{ name: "TEST_ACCOUNT_TOKEN", value: "test-secret", sensitive: true }],
-        };
-        const providerAutoEnableAt = { [id]: "2026-09-06T00:00:00.000Z" };
-        yield* settings.updateSettings({
-          providerInstances: { [id]: instance },
-          providerAutoEnableAt,
-        });
-        const unchanged = yield* settings.updateSettings({
-          providerInstances: {
-            [id]: {
-              ...instance,
-              environment: [
-                { name: "TEST_ACCOUNT_TOKEN", value: "", sensitive: true, valueRedacted: true },
-              ],
-            },
-          },
-        });
-        assert.deepEqual(unchanged.providerAutoEnableAt, providerAutoEnableAt);
-        for (const providerInstances of [
-          {},
-          { [id]: { ...instance, config: { homePath: "/new-account" } } },
-        ]) {
-          yield* settings.updateSettings({
-            providerInstances: { [id]: instance },
-            providerAutoEnableAt,
-          });
-          const changed = yield* settings.updateSettings({ providerInstances });
-          assert.deepEqual(changed.providerAutoEnableAt, {});
-        }
-      }).pipe(Effect.provide(makeServerSettingsLayer())),
-  );
-
-  it.effect(
     "serializes server-side settings updates and persists the existing provider switch",
     () =>
       Effect.gen(function* () {
@@ -144,10 +102,6 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         yield* Effect.all(
           [first, second].map((id) =>
             settings.updateSettings((current) => ({
-              providerAutoEnableAt: {
-                ...current.providerAutoEnableAt,
-                [id]: "2026-09-06T00:00:00.000Z",
-              },
               providerInstances: {
                 ...current.providerInstances,
                 [id]: { ...current.providerInstances[id]!, enabled: false },
@@ -161,10 +115,6 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         );
         assert.isFalse(persisted.providerInstances[first]?.enabled);
         assert.isFalse(persisted.providerInstances[second]?.enabled);
-        assert.deepEqual(persisted.providerAutoEnableAt, {
-          [first]: "2026-09-06T00:00:00.000Z",
-          [second]: "2026-09-06T00:00:00.000Z",
-        });
         assert.deepEqual(persisted.providerInstances[first]?.config, { homePath: "/work" });
         const before = yield* fileSystem.readFileString(config.settingsPath);
         yield* settings.updateSettings(() => undefined);

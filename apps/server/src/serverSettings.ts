@@ -63,28 +63,6 @@ const decodeServerSettings = Schema.decodeUnknownEffect(ServerSettings);
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
-const cancelEditedAccountRecovery = (
-  current: ServerSettings,
-  next: ServerSettings,
-  patch: ServerSettingsPatch,
-): ServerSettings => {
-  if (patch.providerAutoEnableAt !== undefined) return next;
-  const providerAutoEnableAt = { ...next.providerAutoEnableAt };
-  // Compare after secret persistence: unchanged redacted credentials must not
-  // cancel another account's deadline when a client sends the whole instance map.
-  for (const rawId of Object.keys(providerAutoEnableAt)) {
-    const id = ProviderInstanceId.make(rawId);
-    if (
-      (patch.providerInstances !== undefined &&
-        !Equal.equals(current.providerInstances[id], next.providerInstances[id])) ||
-      (id === "codex" && !current.providerInstances[id] && patch.providers?.codex !== undefined)
-    ) {
-      delete providerAutoEnableAt[id];
-    }
-  }
-  return { ...next, providerAutoEnableAt };
-};
-
 /**
  * Fold the legacy in-config `enabled` flag into the envelope-level
  * `ProviderInstanceConfig.enabled` and strip it from the config blob, so
@@ -269,11 +247,7 @@ const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
             const resolvedPatch = typeof patch === "function" ? patch(current) : patch;
             if (resolvedPatch === undefined) return resolveTextGenerationProvider(current);
             const next = yield* normalizeServerSettings(
-              cancelEditedAccountRecovery(
-                current,
-                applyServerSettingsPatch(current, resolvedPatch),
-                resolvedPatch,
-              ),
+              applyServerSettingsPatch(current, resolvedPatch),
             );
             yield* Ref.set(currentSettingsRef, next);
             return resolveTextGenerationProvider(next);
@@ -869,9 +843,7 @@ const make = Effect.gen(function* () {
             current,
             applyServerSettingsPatch(current, resolvedPatch),
           );
-          const next = yield* normalizeServerSettings(
-            cancelEditedAccountRecovery(current, nextPersisted, resolvedPatch),
-          );
+          const next = yield* normalizeServerSettings(nextPersisted);
           yield* writeSettingsAtomically(next);
           yield* Cache.set(settingsCache, cacheKey, next);
           yield* emitChange(next);

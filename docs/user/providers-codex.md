@@ -48,13 +48,8 @@ resumes the saved conversation on that account, including after a server restart
 If the saved conversation cannot be restored, T3 Code reports an error. Restore
 the original Codex session files or start a new thread to begin a new conversation.
 
-When Codex reports that an account has reached its usage limit, T3 Code switches
-that instance off in **Settings > Providers**. Choose another configured account
-to continue the thread. When Codex reports reset times for all exhausted quota
-windows, T3 Code turns the instance back on within one minute of the last reset,
-including after a server restart. Without a reported reset time, turn it back on
-using the same switch. Manually disabled instances stay off; changing an account's
-settings cancels its scheduled recovery.
+Quota errors do not change provider settings. Providers stay enabled until you
+turn them off in **Settings > Providers**; a proxy can manage account rotation.
 
 If the account is missing from the picker, compare the home paths in provider
 settings. If two instances show the same unexpected account or models, check their

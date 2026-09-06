@@ -17,17 +17,6 @@ import {
 } from "./serverSettings.ts";
 
 describe("serverSettings helpers", () => {
-  it("replaces quota recovery deadlines so completed deadlines are removed", () => {
-    const id = ProviderInstanceId.make("codex_work");
-    const current = {
-      ...DEFAULT_SERVER_SETTINGS,
-      providerAutoEnableAt: { [id]: "2026-09-06T00:00:00.000Z" },
-    };
-    expect(
-      applyServerSettingsPatch(current, { providerAutoEnableAt: {} }).providerAutoEnableAt,
-    ).toEqual({});
-  });
-
   it("ignores missing and blank persisted observability URLs", () => {
     expect(parsePersistedServerObservabilitySettings("{}")).toEqual({
       otlpTracesUrl: undefined,
